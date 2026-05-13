@@ -99,6 +99,7 @@ let main argv =
             let pt = ColPoint()
             let iv = ColInterval()
             let js = ColJSONStr()
+            let bf = ColBFloat16()
             let onBlock (rows: int) =
                 for i in 0 .. rows - 1 do
                     let nuStr =
@@ -119,8 +120,8 @@ let main argv =
                     let ptStr = sprintf "(%g, %g)" p.X p.Y
                     let ivv = iv.Row(i)
                     let ivStr = sprintf "%d %A" ivv.Value ivv.Scale
-                    printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s"
-                        (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i))
+                    printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s | %g"
+                        (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i)) (bf.RowFloat(i))
 
             let q = { ChQuery.defaults with
                         Body =
@@ -135,7 +136,8 @@ let main argv =
                             "CAST((number % 3) AS Enum8('a' = 0, 'b' = 1, 'c' = 2)) AS en, " +
                             "(toFloat64(number), toFloat64(number * number))::Point AS pt, " +
                             "(INTERVAL toInt64(number) DAY) AS iv, " +
-                            "CAST(concat('{\"n\":', toString(number), '}') AS JSON) AS js " +
+                            "CAST(concat('{\"n\":', toString(number), '}') AS JSON) AS js, " +
+                            "toBFloat16(number * 0.5) AS bf " +
                             "FROM system.numbers_mt LIMIT 6"
                         Results = [
                             { Name = "n32"; Column = n32 }
@@ -150,6 +152,7 @@ let main argv =
                             { Name = "pt";  Column = pt  }
                             { Name = "iv";  Column = iv  }
                             { Name = "js";  Column = js  }
+                            { Name = "bf";  Column = bf  }
                         ]
                         OnBlock = onBlock
                         Settings = [
