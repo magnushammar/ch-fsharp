@@ -7,31 +7,62 @@ open System.Threading
 open System.Threading.Tasks
 open Ch.Proto
 
-/// Caller-owned result target for one column in the SELECT.
+/// Caller-owned target for one column. Used both for `Results` (SELECT
+/// output) and `Input` (INSERT source) — the shape is identical.
 type ColumnResult = {
     /// Optional name. Empty string accepts whatever the server sends at this
-    /// index. Otherwise must match the server-reported column name.
+    /// index. Otherwise must match the server-reported column name. For
+    /// `Input`, the name is sent to the server with the data block.
     Name: string
-    /// Receiver column. Same instance is reused across blocks.
+    /// Receiver/source column. Same instance is reused across blocks.
     Column: IColumnResult
 }
 
-/// Description of a SELECT query. Mirrors `ch.Query` in ch-go but without
-/// the INSERT/OnInput surface (read-only for now).
+/// Type alias for clarity at INSERT call sites.
+type ColumnInput = ColumnResult
+
+/// Description of a SELECT or INSERT query. Mirrors `ch.Query` in ch-go.
 type ChQuery = {
     /// SQL text.
     Body: string
     /// Optional explicit query id. Defaults to a fresh UUID.
     QueryId: string option
-    /// One ColumnResult per server column, matched by **index**. Each entry's
-    /// `Column` is decoded into in-place every block.
+    /// One `ColumnResult` per server column, matched by **index**. Each
+    /// entry's `Column` is decoded into in-place every block. Used for
+    /// SELECT. Leave empty for INSERT.
     Results: ColumnResult list
+    /// One `ColumnInput` per input column. The driver reads
+    /// `Column.EncodeColumn` per row block sent to the server. Used for
+    /// INSERT. Leave empty for SELECT.
+    Input: ColumnInput list
     /// Called once per server `Data` block, *after* all column decodes. The
     /// int argument is the row count of the current block.
     OnBlock: int -> unit
+    /// Called *after* each block has been written to the server when
+    /// streaming INSERT data. Returns `true` to send another block (refill
+    /// the columns first), `false` to terminate. `None` = single block.
+    OnInput: (unit -> bool) option
     /// Query-scope settings (e.g. `max_block_size`).
     Settings: Query.Setting list
 }
+
+[<RequireQualifiedAccess>]
+module ChQuery =
+    /// Default `ChQuery` skeleton — fill in `Body` plus the role-specific
+    /// fields (`Results`+`OnBlock` for SELECT, `Input`+optional `OnInput`
+    /// for INSERT). Callers use record-update syntax:
+    /// ```fsharp
+    /// { ChQuery.defaults with Body = "..."; Results = [...]; OnBlock = ... }
+    /// ```
+    let defaults : ChQuery = {
+        Body = ""
+        QueryId = None
+        Results = []
+        Input = []
+        OnBlock = ignore
+        OnInput = None
+        Settings = []
+    }
 
 /// Single TCP connection to ClickHouse, mirroring `ch.Client` in ch-go.
 /// Not thread-safe — same as the Go reference. Use one connection per
@@ -97,6 +128,70 @@ type Client private (
         else
             buf.PutRaw(inner.WrittenSpan)
 
+    /// Encode one Data block carrying the rows currently in `input`. Mirrors
+    /// `client.go: encodeBlock`. Layout:
+    ///   ClientCodeData + tempTableName="" + (optionally compressed:)
+    ///     BlockInfo + columns + rows + per-column(name, type, custom=false,
+    ///     state header if rows>0, body)
+    ///
+    /// For now the compressed-wrapper method is None (no LZ4) even when
+    /// `opts.Compression = true` — matches our `EncodeBlankBlock` choice.
+    /// True LZ4 framing for INSERT bodies is a perf follow-up.
+    member private _.EncodeDataBlock(input: ColumnInput array) =
+        buf.PutClientCode(ClientCode.Data)
+        buf.PutString("")
+
+        let body = Buf(1024)
+        body.PutUVarInt(1UL); body.PutBool(false)
+        body.PutUVarInt(2UL); body.PutInt32(-1)   // BucketNum = -1
+        body.PutUVarInt(0UL)
+        body.PutInt(input.Length)                  // columns
+        let rows = if input.Length = 0 then 0 else input.[0].Column.Rows
+        body.PutInt(rows)
+
+        for col in input do
+            body.PutString(col.Name)
+            body.PutString(col.Column.Type)
+            body.PutBool(false)                    // custom serialization = false
+            if rows > 0 then
+                match col.Column with
+                | :? IStatefulColumn as s -> s.EncodeState(body)
+                | _ -> ()
+                col.Column.EncodeColumn(body)
+
+        if opts.Compression then
+            CompressedFrame.wrapNone buf body.WrittenSpan
+        else
+            buf.PutRaw(body.WrittenSpan)
+
+    /// Stream input blocks to the server. Called after the server's header
+    /// block (rows=0) has been decoded and used to drive `Infer` on each
+    /// input column. Mirrors `query.go: sendInput`.
+    member private this.SendInputAsync(q: ChQuery, ct: CancellationToken) : Task =
+        task {
+            let inputs = List.toArray q.Input
+            // First (or only) data block.
+            this.EncodeDataBlock(inputs)
+
+            match q.OnInput with
+            | None -> ()
+            | Some next ->
+                // Multi-block streaming: flush each block, ask for the next.
+                do! buf.WriteToAndResetAsync(stream, ct)
+                do! stream.FlushAsync(ct)
+                let mutable more = next()
+                while more do
+                    this.EncodeDataBlock(inputs)
+                    do! buf.WriteToAndResetAsync(stream, ct)
+                    do! stream.FlushAsync(ct)
+                    more <- next()
+
+            // End-of-data marker terminates the input stream.
+            this.EncodeBlankBlock()
+            do! buf.WriteToAndResetAsync(stream, ct)
+            do! stream.FlushAsync(ct)
+        }
+
     /// Execute a SELECT query. Receive-only — sends Query + blank end-of-data
     /// marker, then drives the response loop.
     member this.DoAsync(q: ChQuery, ct: CancellationToken) : Task =
@@ -128,6 +223,14 @@ type Client private (
 
             // 4. Synchronous receive loop. The hot path is `ServerCode.Data`,
             //    everything else is rare/small.
+            //
+            //    Mode dispatch: INSERT (`q.Input` non-empty) treats the FIRST
+            //    server `Data` block (always rows=0) as a schema header used
+            //    to drive `Infer` on each input column. After that we send
+            //    our input, and the rest of the loop just drains
+            //    Progress/Profile/EndOfStream.
+            let isInsert = not q.Input.IsEmpty
+            let mutable headerSeen = false
             let mutable stop = false
             while not stop do
                 let code = reader.ServerCode()
@@ -142,16 +245,24 @@ type Client private (
                         raise (InvalidDataException
                             $"unexpected temp-table name '{tempTable}'")
 
-                    let results = List.toArray q.Results
+                    // INSERT header: targets are input columns, but the body
+                    // is empty — we only use the server-supplied type string
+                    // to drive Infer + compat check. SELECT: targets are
+                    // result columns and we decode the body in place.
+                    let insertHeader = isInsert && not headerSeen
+                    let targets =
+                        if insertHeader then List.toArray q.Input
+                        else List.toArray q.Results
                     let mutable colIdx = 0
                     let mutable blockRows = 0
 
                     let handler : Block.ColumnHandler =
                         fun name typ rowCount ->
-                            if colIdx >= results.Length then
+                            if targets.Length = 0 then () else
+                            if colIdx >= targets.Length then
                                 raise (InvalidDataException
-                                    $"server sent column [{colIdx}] but only {results.Length} expected")
-                            let target = results.[colIdx]
+                                    $"server sent column [{colIdx}] but only {targets.Length} expected")
+                            let target = targets.[colIdx]
                             if target.Name <> "" && target.Name <> name then
                                 raise (InvalidDataException
                                     $"column [{colIdx}] name mismatch: server '{name}', expected '{target.Name}'")
@@ -166,16 +277,17 @@ type Client private (
                             if not (ColumnType.isCompatible target.Column.Type typ) then
                                 raise (InvalidDataException
                                     $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
-                            // State header (e.g. LowCardinality) decodes before
-                            // the body — but only when the block has rows
-                            // (ch-go `Results.DecodeResult`: `if b.Rows == 0
-                            // then continue` skips state+body).
-                            if rowCount > 0 then
-                                match target.Column with
-                                | :? IStatefulColumn as s -> s.DecodeState(reader)
-                                | _ -> ()
-                            target.Column.DecodeColumn(reader, rowCount)
-                            blockRows <- rowCount
+                            if not insertHeader then
+                                // State header (e.g. LowCardinality) decodes
+                                // before the body — but only when the block
+                                // has rows. ch-go `Results.DecodeResult` does
+                                // the same `if b.Rows == 0 then continue`.
+                                if rowCount > 0 then
+                                    match target.Column with
+                                    | :? IStatefulColumn as s -> s.DecodeState(reader)
+                                    | _ -> ()
+                                target.Column.DecodeColumn(reader, rowCount)
+                                blockRows <- rowCount
                             colIdx <- colIdx + 1
 
                     if opts.Compression then
@@ -185,7 +297,12 @@ type Client private (
                     else
                         Block.decode reader handler |> ignore
 
-                    if blockRows > 0 then q.OnBlock(blockRows)
+                    if isInsert && not headerSeen then
+                        // Server header consumed; now stream our input.
+                        headerSeen <- true
+                        do! this.SendInputAsync(q, ct)
+                    elif blockRows > 0 then
+                        q.OnBlock(blockRows)
 
                 | ServerCode.Progress ->
                     Progress.decodeAndIgnore reader

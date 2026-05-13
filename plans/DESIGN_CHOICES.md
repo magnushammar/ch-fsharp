@@ -85,6 +85,32 @@ but not yet started; they will wrap the low-level API.
     (the name-API) and `AppendRaw(int8)` / `RawValue(i): int8` (the wire
     API). Saves one indirection without losing functionality.
 
+### INSERT path
+
+12. **INSERT uses a single-threaded send → wait-for-header →
+    send-input → drain pattern** instead of ch-go's
+    goroutine+channel design. The client sends the Query and the
+    blank external-data marker, then enters the receive loop. The
+    first `Data` packet from server (rows=0, columns=N) is
+    recognised as the INSERT header when `Input` is non-empty:
+    each input column's `Infer` runs against the server-supplied
+    type string, then `SendInputAsync` writes one data block plus a
+    blank end-of-data block. The loop then drains
+    Progress/Profile/ProfileEvents/EndOfStream.
+
+13. **Header block uses Infer + type-check only — no DecodeColumn
+    on input columns.** `DecodeColumn(reader, 0)` on `ColPrimitive`
+    sets `count <- 0`, which would wipe the rows the caller had
+    already appended for INSERT. The handler now skips body decode
+    entirely when `insertHeader` is true.
+
+14. **DDL on Atomic database engine returns before tables are
+    visible.** The `--insert` smoke adds a 200 ms sleep between
+    CREATE and INSERT to absorb the race. This is a server-side
+    visibility issue (the default `default` database is `Atomic`),
+    not a driver bug — `mutations_sync = 2` and friends address
+    similar concerns for DML but not for DDL.
+
 ### `ColLowCardinality` — the load-bearing departure
 
 8. **No dense `Values []T` materialisation on decode.** ch-go materialises

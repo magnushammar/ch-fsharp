@@ -29,6 +29,7 @@ let private parseArgs (argv: string array) =
         | "--verify" -> verifyOnly <- true; i <- i + 1
         | "--lz4" -> compression <- true; i <- i + 1
         | "--mixed" -> rows <- -1L; i <- i + 1   // sentinel: run a mixed-type smoke instead
+        | "--insert" -> rows <- -2L; i <- i + 1  // sentinel: run an INSERT round-trip
         | "--help" | "-h" ->
             eprintfn "Usage: ch-bench-numbers [--addr host:port] [--user u] [--database d]"
             eprintfn "                        [--rows N] [--block-size N]"
@@ -98,67 +99,132 @@ let main argv =
             let pt = ColPoint()
             let iv = ColInterval()
             let js = ColJSONStr()
-            let q : ChQuery = {
-                Body =
-                    "SELECT toInt32(number) AS n32, " +
-                    "toString(number) AS s, " +
-                    "toLowCardinality(toString(number % 3)) AS lc, " +
-                    "if(number % 2 = 0, NULL, toInt32(number)) AS nu, " +
-                    "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar, " +
-                    "map('id', toString(number), 'sq', toString(number * number)) AS mp, " +
-                    "tuple(concat('row-', toString(number)), toInt32(number * 10)) AS tp, " +
-                    "toDecimal32(number * 1.5, 2) AS dec, " +
-                    "CAST((number % 3) AS Enum8('a' = 0, 'b' = 1, 'c' = 2)) AS en, " +
-                    "(toFloat64(number), toFloat64(number * number))::Point AS pt, " +
-                    "(INTERVAL toInt64(number) DAY) AS iv, " +
-                    "CAST(concat('{\"n\":', toString(number), '}') AS JSON) AS js " +
-                    "FROM system.numbers_mt LIMIT 6"
-                QueryId = None
-                Results = [
-                    { Name = "n32"; Column = n32 }
-                    { Name = "s";   Column = s   }
-                    { Name = "lc";  Column = lc  }
-                    { Name = "nu";  Column = nu  }
-                    { Name = "ar";  Column = ar  }
-                    { Name = "mp";  Column = mp  }
-                    { Name = "tp";  Column = tp  }
-                    { Name = "dec"; Column = dec }
-                    { Name = "en";  Column = en  }
-                    { Name = "pt";  Column = pt  }
-                    { Name = "iv";  Column = iv  }
-                    { Name = "js";  Column = js  }
-                ]
-                OnBlock = fun rows ->
-                    for i in 0 .. rows - 1 do
-                        let nuStr =
-                            match nu.Row(i) with
-                            | ValueSome v -> string v
-                            | ValueNone -> "NULL"
-                        let arStr =
-                            ar.Row(i)
-                            |> Array.map string
-                            |> String.concat ","
-                        let mpStr =
-                            mp.RowKV(i)
-                            |> Array.map (fun kv -> kv.Key + "=" + kv.Value)
-                            |> String.concat ","
-                        let tpStr2 = sprintf "(%s, %d)" (tpStr.Row(i)) (tpInt.Row(i))
-                        let decStr = sprintf "%O" (Decimal.fromInt32 (dec.Row(i)) 2)
-                        let p = pt.Row(i)
-                        let ptStr = sprintf "(%g, %g)" p.X p.Y
-                        let ivv = iv.Row(i)
-                        let ivStr = sprintf "%d %A" ivv.Value ivv.Scale
-                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s"
-                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i))
-                Settings = [
-                    { Key = "output_format_native_write_json_as_string"
-                      Value = "1"; Important = false }
-                    { Key = "allow_experimental_json_type"
-                      Value = "1"; Important = false }
-                ]
-            }
+            let onBlock (rows: int) =
+                for i in 0 .. rows - 1 do
+                    let nuStr =
+                        match nu.Row(i) with
+                        | ValueSome v -> string v
+                        | ValueNone -> "NULL"
+                    let arStr =
+                        ar.Row(i)
+                        |> Array.map string
+                        |> String.concat ","
+                    let mpStr =
+                        mp.RowKV(i)
+                        |> Array.map (fun kv -> kv.Key + "=" + kv.Value)
+                        |> String.concat ","
+                    let tpStr2 = sprintf "(%s, %d)" (tpStr.Row(i)) (tpInt.Row(i))
+                    let decStr = sprintf "%O" (Decimal.fromInt32 (dec.Row(i)) 2)
+                    let p = pt.Row(i)
+                    let ptStr = sprintf "(%g, %g)" p.X p.Y
+                    let ivv = iv.Row(i)
+                    let ivStr = sprintf "%d %A" ivv.Value ivv.Scale
+                    printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s"
+                        (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i))
+
+            let q = { ChQuery.defaults with
+                        Body =
+                            "SELECT toInt32(number) AS n32, " +
+                            "toString(number) AS s, " +
+                            "toLowCardinality(toString(number % 3)) AS lc, " +
+                            "if(number % 2 = 0, NULL, toInt32(number)) AS nu, " +
+                            "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar, " +
+                            "map('id', toString(number), 'sq', toString(number * number)) AS mp, " +
+                            "tuple(concat('row-', toString(number)), toInt32(number * 10)) AS tp, " +
+                            "toDecimal32(number * 1.5, 2) AS dec, " +
+                            "CAST((number % 3) AS Enum8('a' = 0, 'b' = 1, 'c' = 2)) AS en, " +
+                            "(toFloat64(number), toFloat64(number * number))::Point AS pt, " +
+                            "(INTERVAL toInt64(number) DAY) AS iv, " +
+                            "CAST(concat('{\"n\":', toString(number), '}') AS JSON) AS js " +
+                            "FROM system.numbers_mt LIMIT 6"
+                        Results = [
+                            { Name = "n32"; Column = n32 }
+                            { Name = "s";   Column = s   }
+                            { Name = "lc";  Column = lc  }
+                            { Name = "nu";  Column = nu  }
+                            { Name = "ar";  Column = ar  }
+                            { Name = "mp";  Column = mp  }
+                            { Name = "tp";  Column = tp  }
+                            { Name = "dec"; Column = dec }
+                            { Name = "en";  Column = en  }
+                            { Name = "pt";  Column = pt  }
+                            { Name = "iv";  Column = iv  }
+                            { Name = "js";  Column = js  }
+                        ]
+                        OnBlock = onBlock
+                        Settings = [
+                            { Key = "output_format_native_write_json_as_string"
+                              Value = "1"; Important = false }
+                            { Key = "allow_experimental_json_type"
+                              Value = "1"; Important = false }
+                        ] }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
             0
+        elif rows = -2L then
+            // INSERT round-trip smoke. Creates a temp table, inserts 4 rows
+            // via the driver, then SELECTs them back and prints them.
+            let table = sprintf "ch_fsharp_insert_smoke_%d" (System.Diagnostics.Process.GetCurrentProcess().Id)
+            let runStmt (sql: string) =
+                let q = { ChQuery.defaults with Body = sql }
+                client.DoAsync(q, ct).GetAwaiter().GetResult()
+
+            runStmt (sprintf "DROP TABLE IF EXISTS %s" table)
+            runStmt (sprintf "CREATE TABLE %s (id Int32, name String, score Float64) ENGINE = Memory" table)
+            // Atomic DB engine makes CREATE asynchronous — wait a moment for
+            // visibility before the INSERT (which would otherwise race).
+            System.Threading.Thread.Sleep(200)
+
+            try
+                // Build input columns with 4 sample rows.
+                let id = ColInt32()
+                let name = ColStr()
+                let score = ColFloat64()
+                let rowsToInsert = [|
+                    1, "alpha", 1.5
+                    2, "beta", 2.5
+                    3, "gamma", 3.5
+                    4, "delta", 4.5
+                |]
+                for (i32, s, f) in rowsToInsert do
+                    id.Append(i32)
+                    name.Append(s)
+                    score.Append(f)
+
+                let insertQ = { ChQuery.defaults with
+                                  Body = sprintf "INSERT INTO %s VALUES" table
+                                  Input = [
+                                      { Name = "id"; Column = id }
+                                      { Name = "name"; Column = name }
+                                      { Name = "score"; Column = score }
+                                  ] }
+                client.DoAsync(insertQ, ct).GetAwaiter().GetResult()
+                eprintfn "INSERT: %d rows pushed" rowsToInsert.Length
+
+                // SELECT them back.
+                let outId = ColInt32()
+                let outName = ColStr()
+                let outScore = ColFloat64()
+                let mutable seen = 0
+                let printRow rows =
+                    for j in 0 .. rows - 1 do
+                        printfn "%d | %s | %g" (outId.Row(j)) (outName.Row(j)) (outScore.Row(j))
+                        seen <- seen + 1
+                let selectQ = { ChQuery.defaults with
+                                  Body = sprintf "SELECT id, name, score FROM %s ORDER BY id" table
+                                  Results = [
+                                      { Name = "id"; Column = outId }
+                                      { Name = "name"; Column = outName }
+                                      { Name = "score"; Column = outScore }
+                                  ]
+                                  OnBlock = printRow }
+                client.DoAsync(selectQ, ct).GetAwaiter().GetResult()
+                if seen <> rowsToInsert.Length then
+                    eprintfn "FAIL: expected %d rows back, got %d" rowsToInsert.Length seen
+                    1
+                else
+                    0
+            finally
+                runStmt (sprintf "DROP TABLE IF EXISTS %s" table)
         else
             let col = ColUInt64()
             let mutable totalSum = 0UL
@@ -172,15 +238,13 @@ let main argv =
                 totalSum <- totalSum + s
                 totalRows <- totalRows + int64 n
 
-            let q : ChQuery = {
-                Body = sprintf "SELECT number FROM system.numbers_mt LIMIT %d" rows
-                QueryId = None
-                Results = [ { Name = "number"; Column = col } ]
-                OnBlock = onBlock
-                Settings = [
-                    { Key = "max_block_size"; Value = string blockSize; Important = true }
-                ]
-            }
+            let q = { ChQuery.defaults with
+                        Body = sprintf "SELECT number FROM system.numbers_mt LIMIT %d" rows
+                        Results = [ { Name = "number"; Column = col } ]
+                        OnBlock = onBlock
+                        Settings = [
+                            { Key = "max_block_size"; Value = string blockSize; Important = true }
+                        ] }
 
             let sw = Stopwatch.StartNew()
             client.DoAsync(q, ct).GetAwaiter().GetResult()
