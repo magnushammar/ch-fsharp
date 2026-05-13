@@ -160,7 +160,9 @@ type Client private (
                 col.Column.EncodeColumn(body)
 
         if opts.Compression then
-            CompressedFrame.wrapNone buf body.WrittenSpan
+            // Real LZ4 framing for data blocks. The blank end-of-data block
+            // is small enough that wrapNone (still checksummed) is fine.
+            CompressedFrame.wrapLZ4 buf body.WrittenSpan
         else
             buf.PutRaw(body.WrittenSpan)
 

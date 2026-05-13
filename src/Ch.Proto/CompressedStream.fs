@@ -153,3 +153,32 @@ module CompressedFrame =
         BinaryPrimitives.WriteUInt64LittleEndian(scratch.AsSpan(0, 8), h.Low)
         BinaryPrimitives.WriteUInt64LittleEndian(scratch.AsSpan(8, 8), h.High)
         dest.PutRaw(ReadOnlySpan(scratch, 0, total))
+
+    /// Append `payload` to `dest`, wrapped in a method=0x82 (LZ4) compressed
+    /// frame. Same envelope as `wrapNone` but the payload bytes are LZ4-
+    /// encoded (raw block API, no LZ4 frame magic — matches ch-go's
+    /// `compress.Writer`). Falls back to `wrapNone` if LZ4 would inflate
+    /// past the raw size (e.g. on tiny / random inputs).
+    let wrapLZ4 (dest: Buf) (payload: ReadOnlySpan<byte>) =
+        let dataSize = payload.Length
+        // K4os' MaximumOutputSize gives the worst-case bound.
+        let maxOut = LZ4Codec.MaximumOutputSize(dataSize)
+        let compressed : byte array = Array.zeroCreate maxOut
+        let n =
+            if dataSize = 0 then 0
+            else LZ4Codec.Encode(payload, Span(compressed, 0, maxOut))
+        if n < 0 || n >= dataSize then
+            // Compression didn't shrink it — emit raw with method=None.
+            wrapNone dest payload
+        else
+            let payloadSize = n
+            let total = 25 + payloadSize
+            let scratch : byte array = Array.zeroCreate total
+            scratch.[16] <- 0x82uy
+            BinaryPrimitives.WriteUInt32LittleEndian(scratch.AsSpan(17, 4), uint32 (9 + payloadSize))
+            BinaryPrimitives.WriteUInt32LittleEndian(scratch.AsSpan(21, 4), uint32 dataSize)
+            Array.blit compressed 0 scratch 25 payloadSize
+            let h = CityHash128.hash (ReadOnlySpan(scratch, 16, 9 + payloadSize))
+            BinaryPrimitives.WriteUInt64LittleEndian(scratch.AsSpan(0, 8), h.Low)
+            BinaryPrimitives.WriteUInt64LittleEndian(scratch.AsSpan(8, 8), h.High)
+            dest.PutRaw(ReadOnlySpan(scratch, 0, total))
