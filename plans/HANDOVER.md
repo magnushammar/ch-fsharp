@@ -30,11 +30,13 @@ c5bd507  Add INSERT support: ChQuery.Input + EncodeDataBlock + send/recv flow
 … (Point/Nothing/Interval/JSON/Enum/Decimal/Tuple/Map earlier)
 ```
 
-**171/171 tests pass.** Live multi-type SELECT works end-to-end via
+**201/201 tests pass.** Live multi-type SELECT works end-to-end via
 `/tmp/ch-bench-fs/Ch.Bench.Numbers --mixed` against `localhost:9000`,
 exercising 13 result columns through Map, Tuple, Decimal, Enum8, Point,
 IntervalDay, JSON, and BFloat16. `--insert` round-trips four rows
 through a Memory-engine table both with and without LZ4 compression.
+`ColAuto` resolves any scalar / parameterised column type from a
+server-sent type string for ad-hoc receive scenarios.
 
 ## Repo map
 
@@ -111,9 +113,9 @@ RESULTS.md                               bench numbers + analysis
 | Int256, UInt256 (custom 32-byte struct) | ✅ |
 | BFloat16 (float32 helpers) | ✅ |
 | LZ4 framing on INSERT bodies | ✅ |
+| ColAuto inference (scalars + parameterised) | ✅ (composites NOT auto-built) |
 | Time / Time64 | ⛔ (server here doesn't have it) |
 | LowCardinality(FixedString) | ⛔ (needs content-hash IEqualityComparer) |
-| ColAuto inference | ⛔ |
 | INSERT (single block + OnInput streaming) | ✅ |
 | Full-duplex query loop | ✅ (single-threaded send/wait-header/send-input/drain) |
 | Connection pool | ⛔ (ch-go has it as separate package) |
@@ -123,20 +125,19 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **ColAuto inference**: routes the server-sent type string through a
-   factory that builds the right concrete column. Useful as a high-level
-   convenience; not perf-critical. Primitives + parameterised types
-   (`Decimal(P,S)`, `Enum{8,16}`, `DateTime64(N)`, `Interval{Scale}`) are
-   straightforward via a string-switch dispatch. Composites
-   (`Array(T)`, `Nullable(T)`, `Map(K,V)`, …) need either reflection or
-   non-generic column variants — pick one approach. ch-go reference:
-   `proto/col_auto.go`.
+1. **ColAuto for composites**: today `ColAuto` rejects `Array(T)` /
+   `Nullable(T)` / `Map(K,V)` / `Tuple(T1,…)` / `LowCardinality(T)`.
+   Lifting that requires either reflection (`MakeGenericType` +
+   `Activator.CreateInstance`) or non-generic decode-only variants
+   (`ColArrAny`, `ColNullableAny`, …). The reflection route is shorter
+   but slower; the non-generic-variant route adds ~5 small files but
+   keeps the JIT-inlined hot path.
 
 2. **LowCardinality(FixedString)**: needs an `IEqualityComparer<byte[]>`
-   that hashes content (FNV-1a or xxhash) and a `ColFixedStr` that
-   implements `IColumnOf<byte[]>` (currently it only does
-   `IColumnResult` + raw `AppendBytes`/`RowSpan`). API impact is
-   moderate — see DESIGN_CHOICES if you take this on.
+   (FNV-1a / xxhash content hash) **and** a `ColFixedStr` that
+   implements `IColumnOf<byte[]>` (today it's `IColumnResult` only,
+   with raw `AppendBytes`/`RowSpan` Span APIs). Moderate API impact;
+   the per-row byte-array allocation is the unavoidable cost.
 
 3. **Connection pool**: ch-go has it in a separate `chpool` package and
    explicitly disclaims it as out-of-core. Worth a small F# port for
@@ -148,7 +149,8 @@ RESULTS.md                               bench numbers + analysis
    Cancel.
 
 5. **ZSTD compression**: LZ4 covers the dominant case. ZSTD adds another
-   K4os dependency and a method=0x90 encode/decode branch.
+   compression library dependency and a method=0x90 encode/decode branch
+   parallel to the existing LZ4 path.
 
 The column suite already covers ch-go's supported set bidirectionally
 (read + write) including LZ4 framing on both sides.
