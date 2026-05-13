@@ -17,6 +17,7 @@
     <Compile Include="Reader.fs" />
     <Compile Include="Packets.fs" />
     <Compile Include="Block.fs" />
+    <Compile Include="Int256.fs" />
     <Compile Include="Columns.fs" />
     <Compile Include="ColStr.fs" />
     <Compile Include="ColTime.fs" />

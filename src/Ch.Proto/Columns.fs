@@ -178,3 +178,5 @@ type ColPrimitive<'T
 [<Sealed>] type ColBool()    = inherit ColPrimitive<bool>("Bool")
 [<Sealed>] type ColInt128()  = inherit ColPrimitive<System.Int128>("Int128")
 [<Sealed>] type ColUInt128() = inherit ColPrimitive<System.UInt128>("UInt128")
+[<Sealed>] type ColInt256()  = inherit ColPrimitive<Int256>("Int256")
+[<Sealed>] type ColUInt256() = inherit ColPrimitive<UInt256>("UInt256")

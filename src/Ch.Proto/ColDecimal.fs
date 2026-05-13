@@ -17,6 +17,10 @@ open System
 /// `Int128` value in those cases.
 [<Sealed>] type ColDecimal128() = inherit ColPrimitive<Int128>("Decimal128")
 
+/// `Decimal256` — `Int256` mantissa. P ≤ 76. Same overflow caveat as
+/// Decimal128 applies — `System.Decimal` only holds 28-29 digits.
+[<Sealed>] type ColDecimal256() = inherit ColPrimitive<Int256>("Decimal256")
+
 /// Scale helpers for converting between raw integer mantissas and
 /// `System.Decimal`. `System.Decimal` is base-10 so dividing by `10^scale` is
 /// exact (no rounding). Scale must be in 0..28.
