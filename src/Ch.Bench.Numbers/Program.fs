@@ -97,6 +97,7 @@ let main argv =
             let en = ColEnum8()  // mapping filled by Infer on receive
             let pt = ColPoint()
             let iv = ColInterval()
+            let js = ColJSONStr()
             let q : ChQuery = {
                 Body =
                     "SELECT toInt32(number) AS n32, " +
@@ -109,7 +110,8 @@ let main argv =
                     "toDecimal32(number * 1.5, 2) AS dec, " +
                     "CAST((number % 3) AS Enum8('a' = 0, 'b' = 1, 'c' = 2)) AS en, " +
                     "(toFloat64(number), toFloat64(number * number))::Point AS pt, " +
-                    "(INTERVAL toInt64(number) DAY) AS iv " +
+                    "(INTERVAL toInt64(number) DAY) AS iv, " +
+                    "CAST(concat('{\"n\":', toString(number), '}') AS JSON) AS js " +
                     "FROM system.numbers_mt LIMIT 6"
                 QueryId = None
                 Results = [
@@ -124,6 +126,7 @@ let main argv =
                     { Name = "en";  Column = en  }
                     { Name = "pt";  Column = pt  }
                     { Name = "iv";  Column = iv  }
+                    { Name = "js";  Column = js  }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
@@ -145,9 +148,14 @@ let main argv =
                         let ptStr = sprintf "(%g, %g)" p.X p.Y
                         let ivv = iv.Row(i)
                         let ivStr = sprintf "%d %A" ivv.Value ivv.Scale
-                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s"
-                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr
-                Settings = []
+                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s"
+                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i))
+                Settings = [
+                    { Key = "output_format_native_write_json_as_string"
+                      Value = "1"; Important = false }
+                    { Key = "allow_experimental_json_type"
+                      Value = "1"; Important = false }
+                ]
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
             0
