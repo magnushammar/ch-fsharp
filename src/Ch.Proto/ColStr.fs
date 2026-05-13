@@ -107,3 +107,9 @@ type ColStr() =
             ends.[i] <- curEnd
         dataLen <- curEnd
         count <- n
+
+    interface IColumnResult with
+        member this.Type = this.Type
+        member this.Rows = this.Rows
+        member this.Reset() = this.Reset()
+        member this.DecodeColumn(r, n) = this.DecodeColumn(r, n)

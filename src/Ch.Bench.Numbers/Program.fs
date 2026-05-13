@@ -28,6 +28,7 @@ let private parseArgs (argv: string array) =
         | "--quiet" -> quiet <- true; i <- i + 1
         | "--verify" -> verifyOnly <- true; i <- i + 1
         | "--lz4" -> compression <- true; i <- i + 1
+        | "--mixed" -> rows <- -1L; i <- i + 1   // sentinel: run a mixed-type smoke instead
         | "--help" | "-h" ->
             eprintfn "Usage: ch-bench-numbers [--addr host:port] [--user u] [--database d]"
             eprintfn "                        [--rows N] [--block-size N]"
@@ -79,6 +80,27 @@ let main argv =
             client.PingAsync(ct).GetAwaiter().GetResult()
             if not quiet then eprintfn "Pong"
             0
+        elif rows = -1L then
+            // Mixed-types smoke: SELECT three different column types in one query
+            // to exercise the IColumnResult dispatch end-to-end.
+            let n32 = ColInt32()
+            let s   = ColStr()
+            let n64 = ColUInt64()
+            let q : ChQuery = {
+                Body = "SELECT toInt32(number) AS n32, toString(number) AS s, number AS n64 FROM system.numbers_mt LIMIT 5"
+                QueryId = None
+                Results = [
+                    { Name = "n32"; Column = n32 }
+                    { Name = "s";   Column = s   }
+                    { Name = "n64"; Column = n64 }
+                ]
+                OnBlock = fun rows ->
+                    for i in 0 .. rows - 1 do
+                        printfn "%d | %s | %d" (n32.Row(i)) (s.Row(i)) (n64.Row(i))
+                Settings = []
+            }
+            client.DoAsync(q, ct).GetAwaiter().GetResult()
+            0
         else
             let col = ColUInt64()
             let mutable totalSum = 0UL
@@ -95,7 +117,7 @@ let main argv =
             let q : ChQuery = {
                 Body = sprintf "SELECT number FROM system.numbers_mt LIMIT %d" rows
                 QueryId = None
-                Result = col
+                Results = [ { Name = "number"; Column = col } ]
                 OnBlock = onBlock
                 Settings = [
                     { Key = "max_block_size"; Value = string blockSize; Important = true }

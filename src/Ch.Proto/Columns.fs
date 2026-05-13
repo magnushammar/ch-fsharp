@@ -3,6 +3,15 @@ namespace Ch.Proto
 open System
 open System.Runtime.InteropServices
 
+/// Polymorphic interface every column result must satisfy. The Client uses
+/// this to look up + decode column data by name without knowing the concrete
+/// 'T. Mirrors ch-go's `ColResult` interface (`proto/column.go`).
+type IColumnResult =
+    abstract Type : string
+    abstract Rows : int
+    abstract Reset : unit -> unit
+    abstract DecodeColumn : Reader * int -> unit
+
 /// Generic fixed-width column. Equivalent to ch-go's `Col<T>_unsafe_gen.go`:
 /// the byte buffer IS the LE wire encoding of the row sequence, accessed via
 /// `MemoryMarshal.Cast` for zero-copy reads/writes.
@@ -78,6 +87,12 @@ type ColPrimitive<'T
     member _.EncodeColumn(b: Buf) =
         if count > 0 then
             b.PutRaw(ReadOnlySpan(buf, 0, count * elemSize))
+
+    interface IColumnResult with
+        member this.Type = this.Type
+        member this.Rows = this.Rows
+        member this.Reset() = this.Reset()
+        member this.DecodeColumn(r, n) = this.DecodeColumn(r, n)
 
 
 [<Sealed>] type ColInt8()    = inherit ColPrimitive<int8>("Int8")

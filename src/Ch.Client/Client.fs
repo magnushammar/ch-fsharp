@@ -7,18 +7,27 @@ open System.Threading
 open System.Threading.Tasks
 open Ch.Proto
 
-/// Description of a SELECT query. MVP scope: exactly one result column of
-/// type `UInt64`.
+/// Caller-owned result target for one column in the SELECT.
+type ColumnResult = {
+    /// Optional name. Empty string accepts whatever the server sends at this
+    /// index. Otherwise must match the server-reported column name.
+    Name: string
+    /// Receiver column. Same instance is reused across blocks.
+    Column: IColumnResult
+}
+
+/// Description of a SELECT query. Mirrors `ch.Query` in ch-go but without
+/// the INSERT/OnInput surface (read-only for now).
 type ChQuery = {
     /// SQL text.
     Body: string
     /// Optional explicit query id. Defaults to a fresh UUID.
     QueryId: string option
-    /// Caller-owned column instance that receives row data. The same instance
-    /// is reused across blocks; read it inside `OnBlock` via `Result.AsSpan()`.
-    Result: ColUInt64
-    /// Called once per server `Data` block after `Result.DecodeColumn`. The
-    /// integer argument is the row count of the current block.
+    /// One ColumnResult per server column, matched by **index**. Each entry's
+    /// `Column` is decoded into in-place every block.
+    Results: ColumnResult list
+    /// Called once per server `Data` block, *after* all column decodes. The
+    /// int argument is the row count of the current block.
     OnBlock: int -> unit
     /// Query-scope settings (e.g. `max_block_size`).
     Settings: Query.Setting list
@@ -133,15 +142,25 @@ type Client private (
                         raise (InvalidDataException
                             $"unexpected temp-table name '{tempTable}'")
 
+                    let results = List.toArray q.Results
+                    let mutable colIdx = 0
                     let mutable blockRows = 0
+
                     let handler : Block.ColumnHandler =
-                        fun _name typ rowCount ->
-                            if typ = "UInt64" then
-                                q.Result.DecodeColumn(reader, rowCount)
-                                blockRows <- rowCount
-                            else
+                        fun name typ rowCount ->
+                            if colIdx >= results.Length then
                                 raise (InvalidDataException
-                                    $"MVP supports UInt64 only, got column type '{typ}'")
+                                    $"server sent column [{colIdx}] but only {results.Length} expected")
+                            let target = results.[colIdx]
+                            if target.Name <> "" && target.Name <> name then
+                                raise (InvalidDataException
+                                    $"column [{colIdx}] name mismatch: server '{name}', expected '{target.Name}'")
+                            if target.Column.Type <> typ then
+                                raise (InvalidDataException
+                                    $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
+                            target.Column.DecodeColumn(reader, rowCount)
+                            blockRows <- rowCount
+                            colIdx <- colIdx + 1
 
                     if opts.Compression then
                         reader.EnableCompression()
