@@ -117,8 +117,8 @@ RESULTS.md                               bench numbers + analysis
 | Time / Time64 | ⛔ (server here doesn't have it) |
 | LowCardinality(FixedString) | ⛔ (needs content-hash IEqualityComparer) |
 | ColAuto inference | ⛔ |
-| INSERT / OnInput streaming | 🔜 (biggest remaining surface) |
-| Full-duplex query loop | 🔜 (needed for INSERT) |
+| INSERT (single block + OnInput streaming) | ✅ |
+| Full-duplex query loop | ✅ (single-threaded send/wait-header/send-input/drain) |
 | Connection pool | ⛔ (ch-go has it as separate package) |
 | SSH auth, OTel, query parameters | ⛔ |
 | ZSTD compression | ⛔ (LZ4 covers dominant case) |
@@ -126,33 +126,33 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **M-INSERT**: substantial — needs the full-duplex send/recv pattern
-   from `query.go: Do`. The receiver collects column type info from the
-   server's header block and hands it to the sender via a channel so the
-   sender can do type inference on input columns before encoding rows.
-   Once this lands, all the columns we have are usable on the write side.
-   ch-go reference: `query.go`, `client.go: sendQuery/sendData`.
-
-2. **Int256 / UInt256** (then Decimal256): needs a 32-byte struct in F#
+1. **Int256 / UInt256** (then Decimal256): needs a 32-byte struct in F#
    with the right `MemoryMarshal` layout. Without `System.Int256`, easiest
    path is an explicit struct of 4 × `UInt64` little-endian + arithmetic
    helpers as needed. Read/write are still single `ReadFull`/`PutRaw`.
 
-3. **LowCardinality(FixedString)**: needs an `IEqualityComparer<byte[]>`
+2. **LowCardinality(FixedString)**: needs an `IEqualityComparer<byte[]>`
    that hashes content (FNV-1a or xxhash). ColLowCardinality's dedup
    Dictionary currently uses default reference equality, which would
    never deduplicate byte arrays.
 
-4. **ColAuto inference**: routes the server-sent type string through a
+3. **ColAuto inference**: routes the server-sent type string through a
    factory that builds the right concrete column. Useful as a high-level
    convenience; not perf-critical. ch-go reference: `proto/col_auto.go`.
 
-5. **BFloat16**: needs a custom 16-bit struct with the BFloat16 bit layout
+4. **BFloat16**: needs a custom 16-bit struct with the BFloat16 bit layout
    (1 sign + 8 exponent + 7 mantissa, distinct from .NET `Half`). ch-go
    reference: `proto/col_bfloat16.go`.
 
-After **M-INSERT** the column suite covers ch-go's actually-supported
-set bidirectionally. The deferred entries are increasingly niche.
+5. **LZ4 framing for INSERT bodies**: today `EncodeDataBlock` uses
+   `CompressedFrame.wrapNone` even when `opts.Compression = true`, which
+   matches the cheap-path for blank blocks but throws away the LZ4 win
+   on large inputs. Wire the `LZ4Codec` encoder in to mirror the SELECT
+   decode path.
+
+The deferred entries below the next-up list are increasingly niche —
+the column suite already covers ch-go's actually-supported set
+bidirectionally.
 
 ## Conventions to follow
 
@@ -192,6 +192,7 @@ Smoke test the driver:
 ```bash
 dotnet publish src/Ch.Bench.Numbers -c Release -o /tmp/ch-bench-fs
 /tmp/ch-bench-fs/Ch.Bench.Numbers --mixed   # multi-type SELECT
+/tmp/ch-bench-fs/Ch.Bench.Numbers --insert  # CREATE + INSERT + SELECT round-trip
 /tmp/ch-bench-fs/Ch.Bench.Numbers --rows 100  # tiny UInt64 SELECT
 /tmp/ch-bench-fs/Ch.Bench.Numbers --ping    # handshake only
 ```
