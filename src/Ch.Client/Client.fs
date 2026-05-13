@@ -155,6 +155,14 @@ type Client private (
                             if target.Name <> "" && target.Name <> name then
                                 raise (InvalidDataException
                                     $"column [{colIdx}] name mismatch: server '{name}', expected '{target.Name}'")
+                            // Parameterised columns (Enum8/16, …) infer
+                            // their full mapping from the server-sent type
+                            // string before the type-compat check, so
+                            // `Enum8('a'=1, …)` matches an unconfigured
+                            // `ColEnum8`.
+                            match target.Column with
+                            | :? IInferable as inf -> inf.Infer(typ)
+                            | _ -> ()
                             if not (ColumnType.isCompatible target.Column.Type typ) then
                                 raise (InvalidDataException
                                     $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")

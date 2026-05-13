@@ -27,6 +27,7 @@
     <Compile Include="ColMap.fs" />
     <Compile Include="ColTuple.fs" />
     <Compile Include="ColDecimal.fs" />
+    <Compile Include="ColEnum.fs" />
   </ItemGroup>
 
 </Project>

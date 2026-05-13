@@ -15,7 +15,6 @@ but not yet started; they will wrap the low-level API.
 | **LC(FixedString)** | Needs `IEqualityComparer<byte[]>` for content-hashing in the write-side dedup `Dictionary`. No concrete use case yet — ship LC(String) and LC(numeric) only. |
 | **LC of composite types** (Nullable, Array, …) | Recursive `IColumnOf<'T>` over composite inner. Will revisit when we implement composites. |
 | **Decimal256** | Underlying Int256 not in .NET; needs a custom 32-byte struct. Decimal32/64/128 are shipped. |
-| **Enum8 / Enum16** | Needs `Infer` to parse `Enum8('a'=1, 'b'=2)` DDL into a name⇆int map. |
 | **Int256 / UInt256** | No .NET native type; requires a custom 32-byte struct. |
 | **BFloat16** | .NET 8+ has `Half` (16-bit IEEE), but bfloat16 has a different bit layout (7-bit mantissa vs 10-bit). Needs a custom struct. |
 | **INSERT path / OnInput streaming** | Single biggest piece of remaining functionality. Needs the full-duplex sender/receiver pattern. |
@@ -72,6 +71,19 @@ but not yet started; they will wrap the low-level API.
    we follow the same — scale is the caller's concern. Decimal128 with
    >28 digits overflows `System.Decimal`; users in that regime work with
    the raw `Int128`.
+
+10. **`IInferable` is a Ch.Proto interface, invoked by `Client.fs` before
+    the per-block type-compat check.** ch-go has the same shape
+    (`Inferable.Infer(t ColumnType)`). We use it for Enum8/16 today; will
+    likely extend to `DateTime('tz')`, `DateTime64(N, 'tz')`, and any
+    other parameterised column where the wire layout doesn't change but
+    the type-string does.
+
+11. **`ColEnum8 / ColEnum16` collapse ch-go's two-tier split
+    (`ColEnum8` raw + `ColEnum` high-level helper) into one type each.**
+    Same column instance exposes both `Append(name)` / `Row(i): string`
+    (the name-API) and `AppendRaw(int8)` / `RawValue(i): int8` (the wire
+    API). Saves one indirection without losing functionality.
 
 ### `ColLowCardinality` — the load-bearing departure
 

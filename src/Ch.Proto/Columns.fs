@@ -12,18 +12,26 @@ module ColumnType =
     let private decimalPat =
         Regex(@"Decimal\(\s*(\d+)\s*,\s*\d+\s*\)", RegexOptions.Compiled)
 
-    /// Normalise a type string by downcasting `Decimal(P, S)` substrings to
-    /// the explicit-width form (`Decimal32`, etc). Recurses through composite
-    /// brackets via plain string substitution — `Array(Decimal(9,2))` becomes
-    /// `Array(Decimal32)`.
+    let private enumPat =
+        Regex(@"Enum(8|16)\([^)]*\)", RegexOptions.Compiled)
+
+    /// Normalise a type string by collapsing parameterised forms to their
+    /// fixed-width / fixed-name equivalents:
+    ///   `Decimal(P, S)`        → `Decimal32` / `64` / `128` / `256`
+    ///   `Enum8('a'=1, …)`      → `Enum8`
+    ///   `Enum16(…)`            → `Enum16`
+    /// Composites recurse via plain string substitution —
+    /// `Array(Decimal(9, 2))` becomes `Array(Decimal32)`.
     let normalize (t: string) : string =
-        decimalPat.Replace(t, fun m ->
-            match System.Int32.TryParse(m.Groups.[1].Value) with
-            | true, p when p < 10 -> "Decimal32"
-            | true, p when p < 19 -> "Decimal64"
-            | true, p when p < 39 -> "Decimal128"
-            | true, p when p < 77 -> "Decimal256"
-            | _ -> m.Value)
+        let t1 =
+            decimalPat.Replace(t, fun m ->
+                match System.Int32.TryParse(m.Groups.[1].Value) with
+                | true, p when p < 10 -> "Decimal32"
+                | true, p when p < 19 -> "Decimal64"
+                | true, p when p < 39 -> "Decimal128"
+                | true, p when p < 77 -> "Decimal256"
+                | _ -> m.Value)
+        enumPat.Replace(t1, fun m -> "Enum" + m.Groups.[1].Value)
 
     /// True if a server-sent type string and a client column type are
     /// equivalent after normalisation.
@@ -59,6 +67,15 @@ type IColumnOf<'T> =
 type IStatefulColumn =
     abstract EncodeState : Buf -> unit
     abstract DecodeState : Reader -> unit
+
+/// Optional facet for columns whose wire-level semantics depend on
+/// parameters embedded in the server-sent type string — `Enum8(...)`,
+/// `DateTime64(N, 'tz')`, `Decimal(P, S)`. The client invokes `Infer` with
+/// the full type string before the first column decode so the column can
+/// configure itself. Mirrors ch-go's `Inferable` interface
+/// (`proto/column.go`).
+type IInferable =
+    abstract Infer : string -> unit
 
 /// Generic fixed-width column. Equivalent to ch-go's `Col<T>_unsafe_gen.go`:
 /// the byte buffer IS the LE wire encoding of the row sequence, accessed via
