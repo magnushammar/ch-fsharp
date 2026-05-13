@@ -28,6 +28,8 @@
     <Compile Include="ColTuple.fs" />
     <Compile Include="ColDecimal.fs" />
     <Compile Include="ColEnum.fs" />
+    <Compile Include="ColPoint.fs" />
+    <Compile Include="ColNothing.fs" />
   </ItemGroup>
 
 </Project>
