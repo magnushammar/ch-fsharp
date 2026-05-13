@@ -2,6 +2,33 @@ namespace Ch.Proto
 
 open System
 open System.Runtime.InteropServices
+open System.Text.RegularExpressions
+
+/// Server-sent vs client-declared column type strings don't always agree
+/// verbatim: ClickHouse sends `Decimal(P, S)` where our explicit-width
+/// columns advertise `Decimal32`/`64`/`128`/`256`. ch-go reference:
+/// `proto/column.go: decimalDowncast` + `Conflicts`.
+module ColumnType =
+    let private decimalPat =
+        Regex(@"Decimal\(\s*(\d+)\s*,\s*\d+\s*\)", RegexOptions.Compiled)
+
+    /// Normalise a type string by downcasting `Decimal(P, S)` substrings to
+    /// the explicit-width form (`Decimal32`, etc). Recurses through composite
+    /// brackets via plain string substitution — `Array(Decimal(9,2))` becomes
+    /// `Array(Decimal32)`.
+    let normalize (t: string) : string =
+        decimalPat.Replace(t, fun m ->
+            match System.Int32.TryParse(m.Groups.[1].Value) with
+            | true, p when p < 10 -> "Decimal32"
+            | true, p when p < 19 -> "Decimal64"
+            | true, p when p < 39 -> "Decimal128"
+            | true, p when p < 77 -> "Decimal256"
+            | _ -> m.Value)
+
+    /// True if a server-sent type string and a client column type are
+    /// equivalent after normalisation.
+    let isCompatible (clientType: string) (serverType: string) : bool =
+        normalize clientType = normalize serverType
 
 /// Polymorphic interface every column must satisfy. Mirrors ch-go's
 /// `Column = ColResult + ColInput` combined interface (`proto/column.go`):

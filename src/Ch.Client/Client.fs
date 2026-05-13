@@ -155,7 +155,7 @@ type Client private (
                             if target.Name <> "" && target.Name <> name then
                                 raise (InvalidDataException
                                     $"column [{colIdx}] name mismatch: server '{name}', expected '{target.Name}'")
-                            if target.Column.Type <> typ then
+                            if not (ColumnType.isCompatible target.Column.Type typ) then
                                 raise (InvalidDataException
                                     $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
                             // State header (e.g. LowCardinality) decodes before

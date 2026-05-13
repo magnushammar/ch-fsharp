@@ -17,6 +17,7 @@
     <Compile Include="ColArrTests.fs" />
     <Compile Include="ColMapTests.fs" />
     <Compile Include="ColTupleTests.fs" />
+    <Compile Include="ColDecimalTests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
   </ItemGroup>
 
