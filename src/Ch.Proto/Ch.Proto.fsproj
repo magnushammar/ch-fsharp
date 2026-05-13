@@ -22,6 +22,8 @@
     <Compile Include="ColTime.fs" />
     <Compile Include="ColFixed.fs" />
     <Compile Include="ColLowCardinality.fs" />
+    <Compile Include="ColNullable.fs" />
+    <Compile Include="ColArr.fs" />
   </ItemGroup>
 
 </Project>
