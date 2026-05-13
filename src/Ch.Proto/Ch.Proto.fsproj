@@ -1,8 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsPackable>true</IsPackable>
+    <PackageId>Ch.Proto</PackageId>
+    <Title>ch-fsharp Proto</Title>
+    <Description>ClickHouse native-protocol wire primitives and columnar codec for F#. Ported from ClickHouse/ch-go. Includes 20+ column types (primitives, Decimal, Enum, Date/DateTime, IPv4/IPv6, UUID, Array, Nullable, Map, Tuple, LowCardinality, JSON, BFloat16, Point, Interval, Int256), LZ4 framing, and CityHash128. Use Ch.Client for connection lifecycle.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\..\NOTICE" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />

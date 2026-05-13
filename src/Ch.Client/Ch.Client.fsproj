@@ -1,8 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsPackable>true</IsPackable>
+    <PackageId>Ch.Client</PackageId>
+    <Title>ch-fsharp Client</Title>
+    <Description>F# ClickHouse client over the native TCP protocol (revision 54460). LZ4 compression, columnar SELECT and INSERT, full-duplex query loop with type inference. Ported from ClickHouse/ch-go. Depends on Ch.Proto.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\..\NOTICE" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <Compile Include="Options.fs" />

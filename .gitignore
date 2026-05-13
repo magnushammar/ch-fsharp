@@ -1,7 +1,10 @@
 bin/
 obj/
+nupkgs/
 *.user
 .vs/
 .vscode/
+.idea/
 *.swp
 .DS_Store
+.claude/scheduled_tasks.lock

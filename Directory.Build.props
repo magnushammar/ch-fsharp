@@ -9,5 +9,28 @@
     <TieredCompilation>true</TieredCompilation>
     <TieredPGO>true</TieredPGO>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Suppress F# missing-XML-comment warning on public members. We keep
+         /// docs on most public surfaces but won't fail the build over the
+         odd undocumented helper. -->
+    <NoWarn>$(NoWarn);3390</NoWarn>
+  </PropertyGroup>
+
+  <!-- Shared NuGet package metadata. Per-project files only need to set
+       PackageId, Description, and IsPackable. -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>Magnus Hammar</Authors>
+    <Company>Latinum</Company>
+    <Copyright>Copyright 2026 Magnus Hammar</Copyright>
+    <RepositoryUrl>https://github.com/latinum/ch-go-fsharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/latinum/ch-go-fsharp</PackageProjectUrl>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>clickhouse;fsharp;dotnet;driver;database;columnar;native-protocol</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 </Project>
