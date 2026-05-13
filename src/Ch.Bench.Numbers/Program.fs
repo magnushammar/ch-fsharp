@@ -89,13 +89,15 @@ let main argv =
             let lc  = ColLowCardinality<string>(ColStr())
             let nu  = ColNullable<int32>(ColInt32())
             let ar  = ColArr<int32>(ColInt32())
+            let mp  = ColMap<string, string>(ColStr(), ColStr())
             let q : ChQuery = {
                 Body =
                     "SELECT toInt32(number) AS n32, " +
                     "toString(number) AS s, " +
                     "toLowCardinality(toString(number % 3)) AS lc, " +
                     "if(number % 2 = 0, NULL, toInt32(number)) AS nu, " +
-                    "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar " +
+                    "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar, " +
+                    "map('id', toString(number), 'sq', toString(number * number)) AS mp " +
                     "FROM system.numbers_mt LIMIT 6"
                 QueryId = None
                 Results = [
@@ -104,6 +106,7 @@ let main argv =
                     { Name = "lc";  Column = lc  }
                     { Name = "nu";  Column = nu  }
                     { Name = "ar";  Column = ar  }
+                    { Name = "mp";  Column = mp  }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
@@ -115,8 +118,12 @@ let main argv =
                             ar.Row(i)
                             |> Array.map string
                             |> String.concat ","
-                        printfn "%d | %s | %s | %s | [%s]"
-                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr
+                        let mpStr =
+                            mp.RowKV(i)
+                            |> Array.map (fun kv -> kv.Key + "=" + kv.Value)
+                            |> String.concat ","
+                        printfn "%d | %s | %s | %s | [%s] | {%s}"
+                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr
                 Settings = []
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
