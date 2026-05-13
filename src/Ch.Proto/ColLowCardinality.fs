@@ -99,7 +99,18 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
     // ── IColumnResult / IColumnOf<'T> interface surface ────────────
 
     member _.Type = "LowCardinality(" + inner.Type + ")"
-    member _.Rows = rowCount
+
+    /// Eager row count, matching ch-go's `ColLowCardinality[T].Rows() =
+    /// len(c.Values)`. **Must reflect staged input rows BEFORE `Prepare`
+    /// runs**, otherwise `Client.fs: EncodeDataBlock` writes a block
+    /// header with rows=0 and the server silently accepts the empty
+    /// block (no exception, complete data loss). Returning
+    /// `max values.Count rowCount` covers both sides:
+    ///   - write side: `values.Count` is bumped on every Append.
+    ///   - read side: `rowCount` is set in DecodeColumn; values is unused
+    ///     because we materialise the dictionary, not a dense `Values`
+    ///     list (DESIGN_CHOICES §8).
+    member _.Rows = max values.Count rowCount
 
     /// Exposed for perf-sensitive consumers: iterate Keys + Inner directly to
     /// avoid Row(i)'s per-row branch on keyWidth.

@@ -17,6 +17,27 @@ let private goldenPath (name: string) : string =
         failwith $"golden fixture not found: {p}"
     p
 
+/// Regression: ColLowCardinality.Rows must reflect staged inputs before
+/// Prepare runs, otherwise Client.fs writes an INSERT block header with
+/// rows=0 and the server silently drops the data. Matches ch-go's
+/// `Rows() = len(c.Values)` (proto/col_low_cardinality.go:318).
+[<Fact>]
+let ``ColLowCardinality.Rows is eager: reflects Appends before Prepare`` () =
+    let lc = ColLowCardinality<string>(ColStr())
+    Assert.Equal(0, lc.Rows)
+
+    lc.Append("alpha")
+    lc.Append("beta")
+    lc.Append("alpha")
+    Assert.Equal(3, lc.Rows)   // BEFORE EncodeColumn / Prepare
+
+    let buf = Buf()
+    lc.EncodeColumn(buf)        // triggers Prepare
+    Assert.Equal(3, lc.Rows)   // still 3
+
+    lc.Reset()
+    Assert.Equal(0, lc.Rows)
+
 /// Port of `proto/col_low_cardinality_test.go: TestColLowCardinality_DecodeColumn/Str`.
 [<Fact>]
 let ``ColLowCardinality<string> 25 rows over 3 unique strings (k=8) matches golden`` () =
