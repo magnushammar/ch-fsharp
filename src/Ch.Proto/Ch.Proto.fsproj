@@ -25,6 +25,7 @@
     <Compile Include="ColNullable.fs" />
     <Compile Include="ColArr.fs" />
     <Compile Include="ColMap.fs" />
+    <Compile Include="ColTuple.fs" />
   </ItemGroup>
 
 </Project>
