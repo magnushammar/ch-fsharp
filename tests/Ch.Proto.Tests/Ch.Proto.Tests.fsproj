@@ -24,6 +24,7 @@
     <Compile Include="ColIntervalTests.fs" />
     <Compile Include="ColJSONStrTests.fs" />
     <Compile Include="ColInt256Tests.fs" />
+    <Compile Include="ColBFloat16Tests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
   </ItemGroup>
 
