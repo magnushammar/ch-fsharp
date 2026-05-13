@@ -14,7 +14,7 @@ but not yet started; they will wrap the low-level API.
 |---|---|
 | **LC(FixedString)** | Needs `IEqualityComparer<byte[]>` for content-hashing in the write-side dedup `Dictionary`. No concrete use case yet — ship LC(String) and LC(numeric) only. |
 | **LC of composite types** (Nullable, Array, …) | Recursive `IColumnOf<'T>` over composite inner. Will revisit when we implement composites. |
-| **Decimal32/64/128/256** | Wire-trivial (Int32/64/128/256) but needs `Infer` for `Decimal(P, S)` parsing and a real conversion path to `System.Decimal` (overflow above 28 digits). |
+| **Decimal256** | Underlying Int256 not in .NET; needs a custom 32-byte struct. Decimal32/64/128 are shipped. |
 | **Enum8 / Enum16** | Needs `Infer` to parse `Enum8('a'=1, 'b'=2)` DDL into a name⇆int map. |
 | **Int256 / UInt256** | No .NET native type; requires a custom 32-byte struct. |
 | **BFloat16** | .NET 8+ has `Half` (16-bit IEEE), but bfloat16 has a different bit layout (7-bit mantissa vs 10-bit). Needs a custom struct. |
@@ -59,6 +59,19 @@ but not yet started; they will wrap the low-level API.
 7. **ColUUID uses virtual `Encode/DecodeColumn` overrides** to apply the
    two-half byte-swap. ch-go has a separate `bswapUUID` call invoked from
    the encode/decode hot path.
+
+8. **`ColumnType.normalize` substitutes `Decimal(P, S)` → `Decimal{32,64,128,256}`**
+   so the server-sent `Decimal(9, 2)` matches a client-declared `ColDecimal32`.
+   Regex-based; recurses through composites (`Array(Decimal(9, 2))` →
+   `Array(Decimal32)`). Mirrors ch-go's `decimalDowncast`. Same idea will
+   extend to Enum8/16 once we add Enum, and DateTime timezone parameters.
+
+9. **Decimal scale conversion is a free function (`Decimal.fromInt32` /
+   `toInt32` / `fromInt64` / `toInt64`), not a member on the column.**
+   ch-go uses raw `Decimal32 = int32` aliases with no scale baked in;
+   we follow the same — scale is the caller's concern. Decimal128 with
+   >28 digits overflows `System.Decimal`; users in that regime work with
+   the raw `Int128`.
 
 ### `ColLowCardinality` — the load-bearing departure
 

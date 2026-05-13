@@ -93,6 +93,7 @@ let main argv =
             let tpStr = ColStr()
             let tpInt = ColInt32()
             let tp = ColTuple([| tpStr :> IColumnResult; tpInt :> IColumnResult |])
+            let dec = ColDecimal32()
             let q : ChQuery = {
                 Body =
                     "SELECT toInt32(number) AS n32, " +
@@ -101,7 +102,8 @@ let main argv =
                     "if(number % 2 = 0, NULL, toInt32(number)) AS nu, " +
                     "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar, " +
                     "map('id', toString(number), 'sq', toString(number * number)) AS mp, " +
-                    "tuple(concat('row-', toString(number)), toInt32(number * 10)) AS tp " +
+                    "tuple(concat('row-', toString(number)), toInt32(number * 10)) AS tp, " +
+                    "toDecimal32(number * 1.5, 2) AS dec " +
                     "FROM system.numbers_mt LIMIT 6"
                 QueryId = None
                 Results = [
@@ -112,6 +114,7 @@ let main argv =
                     { Name = "ar";  Column = ar  }
                     { Name = "mp";  Column = mp  }
                     { Name = "tp";  Column = tp  }
+                    { Name = "dec"; Column = dec }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
@@ -128,8 +131,9 @@ let main argv =
                             |> Array.map (fun kv -> kv.Key + "=" + kv.Value)
                             |> String.concat ","
                         let tpStr2 = sprintf "(%s, %d)" (tpStr.Row(i)) (tpInt.Row(i))
-                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s"
-                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2
+                        let decStr = sprintf "%O" (Decimal.fromInt32 (dec.Row(i)) 2)
+                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s"
+                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr
                 Settings = []
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
