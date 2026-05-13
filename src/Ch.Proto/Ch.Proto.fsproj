@@ -18,6 +18,7 @@
     <Compile Include="Packets.fs" />
     <Compile Include="Block.fs" />
     <Compile Include="Columns.fs" />
+    <Compile Include="ColStr.fs" />
   </ItemGroup>
 
 </Project>
