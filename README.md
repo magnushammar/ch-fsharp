@@ -103,9 +103,74 @@ let q = { ChQuery.defaults with
 client.DoAsync(q, ct).GetAwaiter().GetResult()
 ```
 
-For multi-block streaming inserts set `OnInput = Some (fun () -> ...)`
-returning `true` until you're out of data; the driver flushes between
-blocks. Without it the input is sent as one block.
+### Multi-block streaming insert
+
+For sources too large to hold in memory, set `OnInput = Some next`. The
+key thing to internalise — and the bit that's easy to miss from the
+function signature alone — is **when** `next` fires:
+
+1. Caller pre-populates the Input columns *before* `DoAsync`.
+2. `DoAsync` sends the query and receives the server's schema header
+   (used to drive `Infer` on each Input column — sets enum maps,
+   decimal scales, etc.).
+3. Driver encodes whatever's in the columns NOW as **block #1** and
+   flushes it.
+4. Driver calls `next()` — i.e. **`next` fires AFTER each block is on
+   the wire, not before**. The block you just sent is already gone; you
+   cannot amend it. The job of `next` is to (a) clear the column
+   buffers and (b) refill them with the next batch for **block #2**.
+5. Return `true` → encode block #2, flush, call `next()` again. Return
+   `false` → driver writes the blank end-of-data marker; server commits.
+
+```fsharp
+let id    = ColInt32()
+let value = ColFloat64()
+
+// Pull the next batch from your data source into the Input columns.
+// Returns how many rows were appended this call.
+let fillNext (batchSize: int) : int =
+    let mutable n = 0
+    while n < batchSize && hasMoreRows () do
+        let r = readNextRow ()
+        id.Append(r.Id)
+        value.Append(r.Value)
+        n <- n + 1
+    n
+
+// (1) Pre-fill block #1 — these rows go on the wire before next() ever runs.
+fillNext 100_000 |> ignore
+
+// (4) Reset clears the row buffer; the LowCardinality dictionary, if any,
+// is rebuilt fresh from the buffer on every EncodeColumn so each block is
+// self-contained on the wire. The driver does NOT reset Input columns for
+// you between blocks.
+let onInput () =
+    id.Reset()
+    value.Reset()
+    fillNext 100_000 > 0     // true: send another block; false: end stream.
+
+let q = { ChQuery.defaults with
+            Body    = "INSERT INTO my_table VALUES"
+            Input   = [ { Name = "id";    Column = id }
+                        { Name = "value"; Column = value } ]
+            OnInput = Some onInput }
+
+client.DoAsync(q, ct).GetAwaiter().GetResult()
+```
+
+Common slip: starting with empty columns and expecting `next` to fill
+the first batch. It won't — `next` only fires *after* a block has been
+sent, so block #1 would be empty. Always pre-fill before `DoAsync`.
+
+**Without OnInput** the contents of the Input columns at `DoAsync` time
+are sent as a single block. Use this for fixed-size payloads that
+already fit in memory.
+
+**OnBlock vs OnInput.** `OnBlock` fires for every server `Data` block
+during SELECT, after all decode targets in `Results` are filled. It
+does not fire for INSERT — the server's only `Data` packet for an
+INSERT is the schema header (rows=0), which the driver consumes
+internally to infer Input column types.
 
 Note: on databases with `ENGINE = Atomic` (the default), DDL is async —
 add a short sleep or a synchronisation query between `CREATE TABLE` and
