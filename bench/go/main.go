@@ -27,12 +27,13 @@ func run(ctx context.Context) error {
 		blockSize = flag.Int("block-size", 65536, "max_block_size setting")
 		quiet     = flag.Bool("quiet", false, "suppress OK line")
 		pingOnly  = flag.Bool("ping", false, "just ping and exit")
+		useLZ4    = flag.Bool("lz4", false, "enable LZ4 compression")
 	)
 	flag.Parse()
 
 	password := os.Getenv("CLICKHOUSE_PASSWORD")
 
-	c, err := ch.Dial(ctx, ch.Options{
+	opts := ch.Options{
 		Address:    *addr,
 		User:       *user,
 		Database:   *database,
@@ -41,7 +42,11 @@ func run(ctx context.Context) error {
 		Settings: []ch.Setting{
 			ch.SettingInt("max_block_size", *blockSize),
 		},
-	})
+	}
+	if *useLZ4 {
+		opts.Compression = ch.CompressionLZ4
+	}
+	c, err := ch.Dial(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
