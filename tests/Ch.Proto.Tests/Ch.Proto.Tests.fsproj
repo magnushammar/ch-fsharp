@@ -15,6 +15,7 @@
     <Compile Include="ColLowCardinalityTests.fs" />
     <Compile Include="ColNullableTests.fs" />
     <Compile Include="ColArrTests.fs" />
+    <Compile Include="ColMapTests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
   </ItemGroup>
 

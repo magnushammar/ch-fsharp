@@ -24,6 +24,7 @@
     <Compile Include="ColLowCardinality.fs" />
     <Compile Include="ColNullable.fs" />
     <Compile Include="ColArr.fs" />
+    <Compile Include="ColMap.fs" />
   </ItemGroup>
 
 </Project>
