@@ -15,6 +15,7 @@ let private parseArgs (argv: string array) =
     let mutable pingOnly = false
     let mutable quiet = false
     let mutable verifyOnly = false
+    let mutable compression = false
     let mutable i = 0
     while i < argv.Length do
         match argv.[i] with
@@ -26,6 +27,7 @@ let private parseArgs (argv: string array) =
         | "--ping" -> pingOnly <- true; i <- i + 1
         | "--quiet" -> quiet <- true; i <- i + 1
         | "--verify" -> verifyOnly <- true; i <- i + 1
+        | "--lz4" -> compression <- true; i <- i + 1
         | "--help" | "-h" ->
             eprintfn "Usage: ch-bench-numbers [--addr host:port] [--user u] [--database d]"
             eprintfn "                        [--rows N] [--block-size N]"
@@ -36,7 +38,7 @@ let private parseArgs (argv: string array) =
         | other ->
             eprintfn "unknown arg: %s" other
             exit 2
-    rows, blockSize, addr, user, database, pingOnly, quiet, verifyOnly
+    rows, blockSize, addr, user, database, pingOnly, quiet, verifyOnly, compression
 
 /// Expected sum of `0 + 1 + ... + N-1` for N rows from `system.numbers_mt LIMIT N`.
 let private expectedSum (n: int64) : uint64 =
@@ -47,7 +49,7 @@ let private expectedSum (n: int64) : uint64 =
 
 [<EntryPoint>]
 let main argv =
-    let rows, blockSize, addr, user, database, pingOnly, quiet, _verify = parseArgs argv
+    let rows, blockSize, addr, user, database, pingOnly, quiet, _verify, compression = parseArgs argv
 
     let password =
         match Environment.GetEnvironmentVariable("CLICKHOUSE_PASSWORD") with
@@ -60,7 +62,8 @@ let main argv =
             Database = database
             User = user
             Password = password
-            ClientName = "clickhouse/ch-fsharp.bench-numbers" }
+            ClientName = "clickhouse/ch-fsharp.bench-numbers"
+            Compression = compression }
 
     use cts = new CancellationTokenSource()
     let ct = cts.Token

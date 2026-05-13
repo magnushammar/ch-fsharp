@@ -118,11 +118,13 @@ module Query =
         b.PutString(s.Value)
 
     /// Encode a full `ClientCodeQuery` packet at v54460. Always sends
-    /// `Stage=Complete` and `Compression=Disabled` (MVP).
+    /// `Stage=Complete`. `compression` controls whether the server will send
+    /// Data/Totals/Extremes blocks wrapped in the compressed frame format.
     let encode (b: Buf)
                (queryId: string)
                (encodeClientInfo: Buf -> unit)
                (settings: Setting seq)
+               (compression: Compression)
                (body: string) =
         b.PutClientCode(ClientCode.Query)
         b.PutString(queryId)
@@ -131,7 +133,7 @@ module Query =
         b.PutString("")                                 // end of settings
         b.PutString("")                                 // inter-server secret (empty)
         b.PutUVarInt(uint64 (byte Stage.Complete))
-        b.PutUVarInt(uint64 (byte Compression.Disabled))
+        b.PutUVarInt(uint64 (byte compression))
         b.PutString(body)
         b.PutString("")                                 // end of parameters
 

@@ -64,17 +64,29 @@ type Client private (
     /// Append an end-of-data marker block (ClientCodeData + empty table name +
     /// BlockInfo + columns=0 + rows=0) to `buf`. Required after every Query
     /// packet — see `ch.go: encodeBlankBlock`.
+    ///
+    /// When compression is enabled, the block *body* (everything after the
+    /// temp-table-name) must be wrapped in the compressed frame format —
+    /// we use method=None since LZ4 encoding for a 10-byte payload would be
+    /// pointless.
     member private _.EncodeBlankBlock() =
         buf.PutClientCode(ClientCode.Data)
         buf.PutString("")                  // temp-table name
+
+        let inner = Buf(32)
         // BlockInfo zero (Overflows=false, BucketNum=0)
-        buf.PutUVarInt(1UL)
-        buf.PutBool(false)
-        buf.PutUVarInt(2UL)
-        buf.PutInt32(0)
-        buf.PutUVarInt(0UL)
-        buf.PutInt(0)                      // columns
-        buf.PutInt(0)                      // rows
+        inner.PutUVarInt(1UL)
+        inner.PutBool(false)
+        inner.PutUVarInt(2UL)
+        inner.PutInt32(0)
+        inner.PutUVarInt(0UL)
+        inner.PutInt(0)                    // columns
+        inner.PutInt(0)                    // rows
+
+        if opts.Compression then
+            CompressedFrame.wrapNone buf inner.WrittenSpan
+        else
+            buf.PutRaw(inner.WrittenSpan)
 
     /// Execute a SELECT query. Receive-only — sends Query + blank end-of-data
     /// marker, then drives the response loop.
@@ -83,6 +95,8 @@ type Client private (
             let qid = q.QueryId |> Option.defaultValue (Guid.NewGuid().ToString())
 
             // 1. Query packet (`ClientCodeQuery` + id + ClientInfo + settings + body)
+            let compressionMode =
+                if opts.Compression then Compression.Enabled else Compression.Disabled
             Query.encode buf qid
                 (fun b ->
                     ClientInfo.encodeInitial b
@@ -93,6 +107,7 @@ type Client private (
                         opts.ClientName
                         opts.ClientMajor opts.ClientMinor opts.ClientPatch)
                 q.Settings
+                compressionMode
                 q.Body
 
             // 2. End-of-data marker.
@@ -111,6 +126,13 @@ type Client private (
                 | ServerCode.Data
                 | ServerCode.Totals
                 | ServerCode.Extremes ->
+                    // Temp-table-name lives OUTSIDE the compressed block frame
+                    // (see ch-go `client.go:226-234`).
+                    let tempTable = reader.Str()
+                    if tempTable <> "" then
+                        raise (InvalidDataException
+                            $"unexpected temp-table name '{tempTable}'")
+
                     let mutable blockRows = 0
                     let handler : Block.ColumnHandler =
                         fun _name typ rowCount ->
@@ -120,7 +142,14 @@ type Client private (
                             else
                                 raise (InvalidDataException
                                     $"MVP supports UInt64 only, got column type '{typ}'")
-                    let struct (_, _) = Block.decode reader handler
+
+                    if opts.Compression then
+                        reader.EnableCompression()
+                        try Block.decode reader handler |> ignore
+                        finally reader.DisableCompression()
+                    else
+                        Block.decode reader handler |> ignore
+
                     if blockRows > 0 then q.OnBlock(blockRows)
 
                 | ServerCode.Progress ->
@@ -134,11 +163,16 @@ type Client private (
 
                 | ServerCode.Log
                 | ServerCode.ProfileEvents ->
-                    // Drain the block bytes so the parser stays in sync.
+                    // Log / ProfileEvents are blocks but NOT compressible
+                    // (`proto/server_code.go: Compressible`). They share the
+                    // temp-table-name + block-body shape, both uncompressed.
+                    let tempTable = reader.Str()
+                    if tempTable <> "" then
+                        raise (InvalidDataException
+                            $"unexpected temp-table name '{tempTable}'")
                     let skipHandler : Block.ColumnHandler =
                         fun _name typ rowCount -> ColumnSkip.skip reader typ rowCount
-                    let struct (_, _) = Block.decode reader skipHandler
-                    ()
+                    Block.decode reader skipHandler |> ignore
 
                 | ServerCode.EndOfStream ->
                     stop <- true

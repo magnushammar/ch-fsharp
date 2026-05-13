@@ -17,6 +17,8 @@ type ChOptions = {
     ClientMajor: int
     ClientMinor: int
     ClientPatch: int
+    /// Enable LZ4 compression of Data/Totals/Extremes packets. Defaults to false.
+    Compression: bool
 }
 
 [<RequireQualifiedAccess>]
@@ -30,6 +32,7 @@ module ChOptions =
         ClientMajor = 1
         ClientMinor = 0
         ClientPatch = 0
+        Compression = false
     }
 
     let parseHostPort (addr: string) : struct (string * int) =

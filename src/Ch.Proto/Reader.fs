@@ -15,16 +15,25 @@ exception UnexpectedEndOfStreamException of string
 /// The receive loop is synchronous: this matches ch-go's design and avoids
 /// `ReadAsync` overhead on the inner loop.
 [<Sealed>]
-type Reader(stream: Stream) =
+type Reader(rawStream: Stream) =
     let small : byte array = Array.zeroCreate 16
+    let decompressed = new CompressedStream(rawStream) :> Stream
+    let mutable active : Stream = rawStream
 
-    member _.Stream : Stream = stream
+    /// Switch the active source to the decompressing stream. Use before
+    /// reading a compressed block (Data / Totals / Extremes).
+    member _.EnableCompression() = active <- decompressed
+
+    /// Switch back to the raw underlying stream.
+    member _.DisableCompression() = active <- rawStream
+
+    member _.RawStream : Stream = rawStream
 
     member private _.ReadFullInto(span: Span<byte>) : unit =
         let mutable remaining = span.Length
         let mutable offset = 0
         while remaining > 0 do
-            let n = stream.Read(span.Slice(offset, remaining))
+            let n = active.Read(span.Slice(offset, remaining))
             if n <= 0 then
                 raise (UnexpectedEndOfStreamException
                     $"expected {remaining} more bytes (got {offset} of {span.Length})")

@@ -42,11 +42,14 @@ module BlockInfo =
             | other -> raise (InvalidDataException $"unknown BlockInfo field {other}")
         { Overflows = overflows; BucketNum = bucketNum }
 
-/// Block decoding. Receive side of `proto/block.go:248` (`DecodeRawBlock`)
-/// plus the temp-table-name wrapper from `client.go:226-234`.
+/// Block decoding. Receive side of `proto/block.go:248` (`DecodeBlock` /
+/// `DecodeRawBlock`).
 ///
-/// Layout (after ServerCode byte already consumed):
-///   temp-table-name : string   (always "" for server-sent blocks)
+/// The temp-table-name string is **not** part of this — it lives outside the
+/// compressed wrapper (`client.go:226-234`) and the caller reads it before
+/// switching the Reader into compressed mode.
+///
+/// Layout consumed by `decode`:
 ///   BlockInfo                  (tag-id loop)
 ///   columns : uvarint
 ///   rows    : uvarint
@@ -62,13 +65,10 @@ module Block =
     /// from `reader`.
     type ColumnHandler = string -> string -> int -> unit
 
-    /// Decode a full block, invoking `columnHandler` once per column. Returns
-    /// (columns, rows). On an empty block (columns=0, rows=0) the handler is
-    /// not called.
+    /// Decode a block body (BlockInfo + columns/rows + per-column),
+    /// invoking `columnHandler` once per column. Returns (columns, rows).
+    /// On an empty block (columns=0, rows=0) the handler is not called.
     let decode (reader: Reader) (columnHandler: ColumnHandler) : struct (int * int) =
-        let tempTable = reader.Str()
-        if tempTable <> "" then
-            raise (InvalidDataException $"unexpected temp table name '{tempTable}'")
         let _info = BlockInfo.decode reader
         let columns = reader.Int()
         let rows = reader.Int()
