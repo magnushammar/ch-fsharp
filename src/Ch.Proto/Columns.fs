@@ -15,6 +15,12 @@ module ColumnType =
     let private enumPat =
         Regex(@"Enum(8|16)\([^)]*\)", RegexOptions.Compiled)
 
+    let private dateTimeTzPat =
+        Regex(@"DateTime\('[^']*'\)", RegexOptions.Compiled)
+
+    let private dateTime64TzPat =
+        Regex(@"DateTime64\(\s*(\d+)\s*,\s*'[^']*'\s*\)", RegexOptions.Compiled)
+
     /// Normalise a type string by collapsing parameterised forms to their
     /// fixed-width / fixed-name equivalents:
     ///   `Decimal(P, S)`        → `Decimal32` / `64` / `128` / `256`
@@ -31,7 +37,12 @@ module ColumnType =
                 | true, p when p < 39 -> "Decimal128"
                 | true, p when p < 77 -> "Decimal256"
                 | _ -> m.Value)
-        enumPat.Replace(t1, fun m -> "Enum" + m.Groups.[1].Value)
+        let t2 = enumPat.Replace(t1, fun m -> "Enum" + m.Groups.[1].Value)
+        // Strip timezones — `DateTime('UTC')` → `DateTime`,
+        // `DateTime64(3, 'UTC')` → `DateTime64(3)`. The precision is kept
+        // because it determines the on-wire scale.
+        let t3 = dateTimeTzPat.Replace(t2, "DateTime")
+        dateTime64TzPat.Replace(t3, fun m -> sprintf "DateTime64(%s)" m.Groups.[1].Value)
 
     /// True if a server-sent type string and a client column type are
     /// equivalent after normalisation.
