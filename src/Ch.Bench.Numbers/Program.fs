@@ -95,6 +95,7 @@ let main argv =
             let tp = ColTuple([| tpStr :> IColumnResult; tpInt :> IColumnResult |])
             let dec = ColDecimal32()
             let en = ColEnum8()  // mapping filled by Infer on receive
+            let pt = ColPoint()
             let q : ChQuery = {
                 Body =
                     "SELECT toInt32(number) AS n32, " +
@@ -105,7 +106,8 @@ let main argv =
                     "map('id', toString(number), 'sq', toString(number * number)) AS mp, " +
                     "tuple(concat('row-', toString(number)), toInt32(number * 10)) AS tp, " +
                     "toDecimal32(number * 1.5, 2) AS dec, " +
-                    "CAST((number % 3) AS Enum8('a' = 0, 'b' = 1, 'c' = 2)) AS en " +
+                    "CAST((number % 3) AS Enum8('a' = 0, 'b' = 1, 'c' = 2)) AS en, " +
+                    "(toFloat64(number), toFloat64(number * number))::Point AS pt " +
                     "FROM system.numbers_mt LIMIT 6"
                 QueryId = None
                 Results = [
@@ -118,6 +120,7 @@ let main argv =
                     { Name = "tp";  Column = tp  }
                     { Name = "dec"; Column = dec }
                     { Name = "en";  Column = en  }
+                    { Name = "pt";  Column = pt  }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
@@ -135,8 +138,10 @@ let main argv =
                             |> String.concat ","
                         let tpStr2 = sprintf "(%s, %d)" (tpStr.Row(i)) (tpInt.Row(i))
                         let decStr = sprintf "%O" (Decimal.fromInt32 (dec.Row(i)) 2)
-                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s"
-                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i))
+                        let p = pt.Row(i)
+                        let ptStr = sprintf "(%g, %g)" p.X p.Y
+                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s"
+                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr
                 Settings = []
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
