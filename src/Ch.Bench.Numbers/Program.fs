@@ -81,22 +81,29 @@ let main argv =
             if not quiet then eprintfn "Pong"
             0
         elif rows = -1L then
-            // Mixed-types smoke: SELECT three different column types in one query
-            // to exercise the IColumnResult dispatch end-to-end.
+            // Mixed-types smoke: SELECT four columns of distinct types
+            // (Int32, String, UInt64, LowCardinality(String)) to exercise
+            // the IColumnResult dispatch AND the IStatefulColumn state path.
             let n32 = ColInt32()
             let s   = ColStr()
             let n64 = ColUInt64()
+            let lc  = ColLowCardinality<string>(ColStr())
             let q : ChQuery = {
-                Body = "SELECT toInt32(number) AS n32, toString(number) AS s, number AS n64 FROM system.numbers_mt LIMIT 5"
+                Body =
+                    "SELECT toInt32(number) AS n32, toString(number) AS s, number AS n64, " +
+                    "toLowCardinality(toString(number % 3)) AS lc " +
+                    "FROM system.numbers_mt LIMIT 9"
                 QueryId = None
                 Results = [
                     { Name = "n32"; Column = n32 }
                     { Name = "s";   Column = s   }
                     { Name = "n64"; Column = n64 }
+                    { Name = "lc";  Column = lc  }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
-                        printfn "%d | %s | %d" (n32.Row(i)) (s.Row(i)) (n64.Row(i))
+                        printfn "%d | %s | %d | %s"
+                            (n32.Row(i)) (s.Row(i)) (n64.Row(i)) (lc.Row(i))
                 Settings = []
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()

@@ -3,14 +3,35 @@ namespace Ch.Proto
 open System
 open System.Runtime.InteropServices
 
-/// Polymorphic interface every column result must satisfy. The Client uses
-/// this to look up + decode column data by name without knowing the concrete
-/// 'T. Mirrors ch-go's `ColResult` interface (`proto/column.go`).
+/// Polymorphic interface every column must satisfy. Mirrors ch-go's
+/// `Column = ColResult + ColInput` combined interface (`proto/column.go`):
+/// every concrete column type in this codebase has both encode and decode
+/// paths so we don't split the interfaces.
 type IColumnResult =
     abstract Type : string
     abstract Rows : int
     abstract Reset : unit -> unit
     abstract DecodeColumn : Reader * int -> unit
+    abstract EncodeColumn : Buf -> unit
+
+/// Typed refinement of `IColumnResult`. A column that exposes per-row access
+/// for some 'T (e.g. ColPrimitive<int32>: IColumnOf<int32>,
+/// ColStr: IColumnOf<string>). Needed by ColLowCardinality<'T> to read its
+/// dictionary inner and to receive Append calls.
+type IColumnOf<'T> =
+    inherit IColumnResult
+    abstract Append : 'T -> unit
+    abstract Row : int -> 'T
+
+/// Optional facet for columns that carry a per-block state header in front
+/// of the column body. The Block-level decoder invokes DecodeState before
+/// DecodeColumn (encode mirrors). ch-go has the same split as
+/// `StateEncoder` / `StateDecoder` (`proto/column.go`).
+///
+/// Used today only by LowCardinality.
+type IStatefulColumn =
+    abstract EncodeState : Buf -> unit
+    abstract DecodeState : Reader -> unit
 
 /// Generic fixed-width column. Equivalent to ch-go's `Col<T>_unsafe_gen.go`:
 /// the byte buffer IS the LE wire encoding of the row sequence, accessed via
@@ -93,6 +114,11 @@ type ColPrimitive<'T
         member this.Rows = this.Rows
         member this.Reset() = this.Reset()
         member this.DecodeColumn(r, n) = this.DecodeColumn(r, n)
+        member this.EncodeColumn(b) = this.EncodeColumn(b)
+
+    interface IColumnOf<'T> with
+        member this.Append(v) = this.Append(v)
+        member this.Row(i) = this.Row(i)
 
 
 [<Sealed>] type ColInt8()    = inherit ColPrimitive<int8>("Int8")

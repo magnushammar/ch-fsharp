@@ -60,6 +60,7 @@ type ColFixedBytes(typeName: string, elemSize: int) =
         member this.Rows = this.Rows
         member this.Reset() = this.Reset()
         member this.DecodeColumn(r, n) = this.DecodeColumn(r, n)
+        member this.EncodeColumn(b) = this.EncodeColumn(b)
 
 
 /// `FixedString(N)` — exactly N bytes per row, no length prefix on the wire.

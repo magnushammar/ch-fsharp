@@ -158,6 +158,14 @@ type Client private (
                             if target.Column.Type <> typ then
                                 raise (InvalidDataException
                                     $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
+                            // State header (e.g. LowCardinality) decodes before
+                            // the body — but only when the block has rows
+                            // (ch-go `Results.DecodeResult`: `if b.Rows == 0
+                            // then continue` skips state+body).
+                            if rowCount > 0 then
+                                match target.Column with
+                                | :? IStatefulColumn as s -> s.DecodeState(reader)
+                                | _ -> ()
                             target.Column.DecodeColumn(reader, rowCount)
                             blockRows <- rowCount
                             colIdx <- colIdx + 1

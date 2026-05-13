@@ -113,3 +113,8 @@ type ColStr() =
         member this.Rows = this.Rows
         member this.Reset() = this.Reset()
         member this.DecodeColumn(r, n) = this.DecodeColumn(r, n)
+        member this.EncodeColumn(b) = this.EncodeColumn(b)
+
+    interface IColumnOf<string> with
+        member this.Append(s) = this.Append(s)
+        member this.Row(i) = this.Row(i)

@@ -12,6 +12,7 @@
     <Compile Include="ColStrTests.fs" />
     <Compile Include="ColTimeTests.fs" />
     <Compile Include="ColFixedTests.fs" />
+    <Compile Include="ColLowCardinalityTests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
   </ItemGroup>
 
