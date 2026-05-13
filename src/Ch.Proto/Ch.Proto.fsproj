@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Varint.fs" />
+    <Compile Include="Codes.fs" />
+    <Compile Include="Buffer.fs" />
+    <Compile Include="Reader.fs" />
+    <Compile Include="Packets.fs" />
+    <Compile Include="Block.fs" />
+    <Compile Include="ColUInt64.fs" />
+  </ItemGroup>
+
+</Project>

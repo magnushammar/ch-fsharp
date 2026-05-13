@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Ch.Bench.Numbers/Ch.Bench.Numbers.fsproj" />
+    <Project Path="src/Ch.Client/Ch.Client.fsproj" />
+    <Project Path="src/Ch.Proto/Ch.Proto.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Ch.Proto.Tests/Ch.Proto.Tests.fsproj" />
+  </Folder>
+</Solution>
