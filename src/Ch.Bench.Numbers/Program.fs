@@ -90,6 +90,9 @@ let main argv =
             let nu  = ColNullable<int32>(ColInt32())
             let ar  = ColArr<int32>(ColInt32())
             let mp  = ColMap<string, string>(ColStr(), ColStr())
+            let tpStr = ColStr()
+            let tpInt = ColInt32()
+            let tp = ColTuple([| tpStr :> IColumnResult; tpInt :> IColumnResult |])
             let q : ChQuery = {
                 Body =
                     "SELECT toInt32(number) AS n32, " +
@@ -97,7 +100,8 @@ let main argv =
                     "toLowCardinality(toString(number % 3)) AS lc, " +
                     "if(number % 2 = 0, NULL, toInt32(number)) AS nu, " +
                     "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar, " +
-                    "map('id', toString(number), 'sq', toString(number * number)) AS mp " +
+                    "map('id', toString(number), 'sq', toString(number * number)) AS mp, " +
+                    "tuple(concat('row-', toString(number)), toInt32(number * 10)) AS tp " +
                     "FROM system.numbers_mt LIMIT 6"
                 QueryId = None
                 Results = [
@@ -107,6 +111,7 @@ let main argv =
                     { Name = "nu";  Column = nu  }
                     { Name = "ar";  Column = ar  }
                     { Name = "mp";  Column = mp  }
+                    { Name = "tp";  Column = tp  }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
@@ -122,8 +127,9 @@ let main argv =
                             mp.RowKV(i)
                             |> Array.map (fun kv -> kv.Key + "=" + kv.Value)
                             |> String.concat ","
-                        printfn "%d | %s | %s | %s | [%s] | {%s}"
-                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr
+                        let tpStr2 = sprintf "(%s, %d)" (tpStr.Row(i)) (tpInt.Row(i))
+                        printfn "%d | %s | %s | %s | [%s] | {%s} | %s"
+                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2
                 Settings = []
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
