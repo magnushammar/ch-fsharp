@@ -31,6 +31,7 @@
     <Compile Include="ColPoint.fs" />
     <Compile Include="ColNothing.fs" />
     <Compile Include="ColInterval.fs" />
+    <Compile Include="ColJSONStr.fs" />
   </ItemGroup>
 
 </Project>
