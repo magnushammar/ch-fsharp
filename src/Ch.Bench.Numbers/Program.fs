@@ -81,29 +81,42 @@ let main argv =
             if not quiet then eprintfn "Pong"
             0
         elif rows = -1L then
-            // Mixed-types smoke: SELECT four columns of distinct types
-            // (Int32, String, UInt64, LowCardinality(String)) to exercise
-            // the IColumnResult dispatch AND the IStatefulColumn state path.
+            // Mixed-types smoke: exercises every composite + primitive
+            // dispatch path including state header (LowCardinality),
+            // Nullable mask, and Array offsets.
             let n32 = ColInt32()
             let s   = ColStr()
-            let n64 = ColUInt64()
             let lc  = ColLowCardinality<string>(ColStr())
+            let nu  = ColNullable<int32>(ColInt32())
+            let ar  = ColArr<int32>(ColInt32())
             let q : ChQuery = {
                 Body =
-                    "SELECT toInt32(number) AS n32, toString(number) AS s, number AS n64, " +
-                    "toLowCardinality(toString(number % 3)) AS lc " +
-                    "FROM system.numbers_mt LIMIT 9"
+                    "SELECT toInt32(number) AS n32, " +
+                    "toString(number) AS s, " +
+                    "toLowCardinality(toString(number % 3)) AS lc, " +
+                    "if(number % 2 = 0, NULL, toInt32(number)) AS nu, " +
+                    "arrayMap(x -> toInt32(x), range(toUInt8(number % 4))) AS ar " +
+                    "FROM system.numbers_mt LIMIT 6"
                 QueryId = None
                 Results = [
                     { Name = "n32"; Column = n32 }
                     { Name = "s";   Column = s   }
-                    { Name = "n64"; Column = n64 }
                     { Name = "lc";  Column = lc  }
+                    { Name = "nu";  Column = nu  }
+                    { Name = "ar";  Column = ar  }
                 ]
                 OnBlock = fun rows ->
                     for i in 0 .. rows - 1 do
-                        printfn "%d | %s | %d | %s"
-                            (n32.Row(i)) (s.Row(i)) (n64.Row(i)) (lc.Row(i))
+                        let nuStr =
+                            match nu.Row(i) with
+                            | ValueSome v -> string v
+                            | ValueNone -> "NULL"
+                        let arStr =
+                            ar.Row(i)
+                            |> Array.map string
+                            |> String.concat ","
+                        printfn "%d | %s | %s | %s | [%s]"
+                            (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr
                 Settings = []
             }
             client.DoAsync(q, ct).GetAwaiter().GetResult()
