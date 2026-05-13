@@ -106,3 +106,5 @@ type ColPrimitive<'T
 [<Sealed>] type ColFloat32() = inherit ColPrimitive<float32>("Float32")
 [<Sealed>] type ColFloat64() = inherit ColPrimitive<float>("Float64")
 [<Sealed>] type ColBool()    = inherit ColPrimitive<bool>("Bool")
+[<Sealed>] type ColInt128()  = inherit ColPrimitive<System.Int128>("Int128")
+[<Sealed>] type ColUInt128() = inherit ColPrimitive<System.UInt128>("UInt128")

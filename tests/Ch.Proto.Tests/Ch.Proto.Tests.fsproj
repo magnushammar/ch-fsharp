@@ -10,6 +10,8 @@
     <Compile Include="CityHash128Tests.fs" />
     <Compile Include="ColumnsTests.fs" />
     <Compile Include="ColStrTests.fs" />
+    <Compile Include="ColTimeTests.fs" />
+    <Compile Include="ColFixedTests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
   </ItemGroup>
 

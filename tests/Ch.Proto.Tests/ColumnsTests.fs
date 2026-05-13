@@ -116,3 +116,15 @@ let ``ColFloat64 roundtrips against golden`` () =
 let ``ColBool roundtrips against golden`` () =
     // ch-go col_bool_test.go uses `(i%3) == 0`.
     roundtrip (fun () -> ColBool() :> ColPrimitive<bool>) 50 (fun i -> (i % 3) = 0) "col_bool" "Bool"
+
+[<Fact>]
+let ``ColInt128 roundtrips against golden`` () =
+    // ch-go col_int128_gen_test.go appends `Int128{Low: uint64(i)}`.
+    // .NET System.Int128 little-endian layout matches that exactly.
+    roundtrip (fun () -> ColInt128() :> ColPrimitive<System.Int128>)
+        50 (fun i -> System.Int128(0UL, uint64 i)) "col_int128" "Int128"
+
+[<Fact>]
+let ``ColUInt128 roundtrips against golden`` () =
+    roundtrip (fun () -> ColUInt128() :> ColPrimitive<System.UInt128>)
+        50 (fun i -> System.UInt128(0UL, uint64 i)) "col_uint128" "UInt128"
