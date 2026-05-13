@@ -18,19 +18,29 @@ improve them (and log departures in DESIGN_CHOICES.md when we do).
 
 ## Where we are
 
-50 commits in. Last six:
+64 commits in. Recent run added:
 
 ```
-1c6cc6a  Extend --mixed bench smoke to Nullable + Array columns
-cf5be86  Add ColArr<'T>: Offsets + inner column, recursive over 'T
-ab55d22  Add ColNullable<'T>: per-row null mask + inner column
-540ab33  Add ColLowCardinality<'T>; IColumnOf<'T>; IStatefulColumn
-4895dd5  Start plans/DESIGN_CHOICES.md
-d035ce6  Add date/time, network, UUID, FixedString and wide-int columns
+c042eaf  Extend --mixed bench to JSON column with required server settings
+a61c464  Add ColJSONStr: String wire + UInt64 serialization-version state header
+7b54ac0  Extend --mixed bench to IntervalDay column
+5ad6ac8  Add ColInterval: Int64 wire + 8-scale IntervalScale tag
+7b02f3e  Extend --mixed bench to Point column
+e1dc7c5  Add ColPoint (Geo) and ColNothing (Nullable(Nothing))
+a5b5165  Extend --mixed bench to Enum8 column
+792a808  Add ColEnum8/16 + IInferable; normalize strips Enum parameters
+d6c113d  Extend --mixed bench to Decimal(9, 2)
+6d36090  Add ColDecimal32/64/128 + ColumnType.normalize for Decimal(P, S)
+ed65950  Extend --mixed bench smoke to Tuple(String, Int32) column
+8018be5  Add ColTuple + ColNamed: heterogeneous columns side by side
+085a6b4  Extend --mixed bench smoke to Map(String, String) column
+035b8d8  Add ColMap<'K, 'V>: Offsets + parallel keys/values inner columns
 ```
 
-82/82 tests pass. Live multi-type SELECT works end-to-end via
-`/tmp/ch-bench-fs/Ch.Bench.Numbers --mixed` against `localhost:9000`.
+**160/160 tests pass.** Live multi-type SELECT works end-to-end via
+`/tmp/ch-bench-fs/Ch.Bench.Numbers --mixed` against `localhost:9000`,
+exercising 12 result columns including Map, Tuple, Decimal, Enum8,
+Point, IntervalDay and JSON.
 
 ## Repo map
 
@@ -44,7 +54,8 @@ src/Ch.Proto/                            wire primitives + columns
   CompressedStream.fs                     LZ4/None block framing + CompressedFrame writer
   Packets.fs                              ClientHello, ServerHello, Query, …
   Block.fs                                Block-body decode (after state header)
-  Columns.fs                              IColumnResult/IColumnOf/IStatefulColumn +
+  Columns.fs                              IColumnResult/IColumnOf/IStatefulColumn/
+                                          IInferable + ColumnType.normalize +
                                           ColPrimitive<'T> abstract + 11 sealed leaves
   ColStr.fs                               variable-length String column
   ColTime.fs                              Date / Date32 / DateTime / DateTime64 / IPv4
@@ -52,6 +63,14 @@ src/Ch.Proto/                            wire primitives + columns
   ColLowCardinality.fs                    LowCardinality(T)
   ColNullable.fs                          Nullable(T)
   ColArr.fs                               Array(T) + recursive
+  ColMap.fs                               Map(K, V)
+  ColTuple.fs                             Tuple(...) + ColNamed
+  ColDecimal.fs                           Decimal32/64/128 + Decimal scaling helpers
+  ColEnum.fs                              Enum8 / Enum16 with name<=>int map
+  ColPoint.fs                             Point (Geo)
+  ColNothing.fs                           Nothing (for Nullable(Nothing))
+  ColInterval.fs                          Interval{Second..Year}
+  ColJSONStr.fs                           JSON (String wire + version state header)
 src/Ch.Client/                           connection lifecycle
   Options.fs                              ChOptions record
   Client.fs                               Connect/Ping/Do, state dispatch
@@ -84,15 +103,22 @@ RESULTS.md                               bench numbers + analysis
 | LZ4 compression + CityHash128 | ✅ |
 | Nullable(T) | ✅ |
 | Array(T) (recursive) | ✅ |
-| Map(K, V), Tuple(T1, …, Tn) | 🔜 |
-| Decimal32/64/128/256 | ⛔ (needs Infer) |
-| Enum8/16 | ⛔ (needs Infer) |
+| Map(K, V) | ✅ |
+| Tuple(T1, …, Tn) + ColNamed | ✅ |
+| Decimal32/64/128 | ✅ |
+| Enum8 / Enum16 (+ IInferable) | ✅ |
+| Point (Geo) | ✅ |
+| Nothing / Nullable(Nothing) | ✅ |
+| Interval{Second..Year} | ✅ |
+| JSON (string serialization v1) | ✅ |
+| Decimal256 | ⛔ (no Int256 yet) |
 | Int256, UInt256 | ⛔ (no .NET native) |
 | BFloat16 | ⛔ |
+| Time / Time64 | ⛔ (server here doesn't have it) |
 | LowCardinality(FixedString) | ⛔ (needs content-hash IEqualityComparer) |
 | ColAuto inference | ⛔ |
-| INSERT / OnInput streaming | ⛔ (biggest remaining surface) |
-| Full-duplex query loop | ⛔ (needed for INSERT) |
+| INSERT / OnInput streaming | 🔜 (biggest remaining surface) |
+| Full-duplex query loop | 🔜 (needed for INSERT) |
 | Connection pool | ⛔ (ch-go has it as separate package) |
 | SSH auth, OTel, query parameters | ⛔ |
 | ZSTD compression | ⛔ (LZ4 covers dominant case) |
@@ -100,32 +126,33 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **M-Map**: `ColMap<'K, 'V>(keys: IColumnOf<'K>, values: IColumnOf<'V>)`.
-   Same shape as Array but with two parallel inner columns at the same offset
-   table. ~80 LOC + tests + golden + live smoke. Use ch-go's
-   `proto/col_map.go` and `_golden/col_map_of_*.raw` as the spec.
-
-2. **M-Tuple**: heterogeneous columns concatenated, no offsets. F# generics
-   don't do heterogeneous tuples cleanly — likely shape is a non-generic
-   `ColTuple(inners: IColumnResult[])` that the user reads back by index
-   from `Inners[i]`. ch-go's `proto/col_tuple.go` is the reference.
-
-3. **M-Decimal**: `Decimal(P, S)` needs `Infer` — column type string carries
-   precision and scale, which determines underlying width (Int32/64/128/256)
-   and the .NET `decimal` scaling. Add `IInferable` interface (matches
-   ch-go's `Infer`).
-
-4. **M-Enum**: Enum8/16 needs `Infer` to parse `Enum8('a'=1,'b'=2)` DDL into
-   a name⇔int map. Public API: Append("name") / Row(i) -> string. Underlying
-   wire is Int8/Int16.
-
-5. **M-INSERT**: substantial — needs the full-duplex send/recv pattern
+1. **M-INSERT**: substantial — needs the full-duplex send/recv pattern
    from `query.go: Do`. The receiver collects column type info from the
    server's header block and hands it to the sender via a channel so the
    sender can do type inference on input columns before encoding rows.
+   Once this lands, all the columns we have are usable on the write side.
+   ch-go reference: `query.go`, `client.go: sendQuery/sendData`.
 
-After M-Map+M-Tuple+M-Decimal+M-Enum, primitive read-side coverage matches
-ch-go's actually-supported set. M-INSERT then unlocks the write side.
+2. **Int256 / UInt256** (then Decimal256): needs a 32-byte struct in F#
+   with the right `MemoryMarshal` layout. Without `System.Int256`, easiest
+   path is an explicit struct of 4 × `UInt64` little-endian + arithmetic
+   helpers as needed. Read/write are still single `ReadFull`/`PutRaw`.
+
+3. **LowCardinality(FixedString)**: needs an `IEqualityComparer<byte[]>`
+   that hashes content (FNV-1a or xxhash). ColLowCardinality's dedup
+   Dictionary currently uses default reference equality, which would
+   never deduplicate byte arrays.
+
+4. **ColAuto inference**: routes the server-sent type string through a
+   factory that builds the right concrete column. Useful as a high-level
+   convenience; not perf-critical. ch-go reference: `proto/col_auto.go`.
+
+5. **BFloat16**: needs a custom 16-bit struct with the BFloat16 bit layout
+   (1 sign + 8 exponent + 7 mantissa, distinct from .NET `Half`). ch-go
+   reference: `proto/col_bfloat16.go`.
+
+After **M-INSERT** the column suite covers ch-go's actually-supported
+set bidirectionally. The deferred entries are increasingly niche.
 
 ## Conventions to follow
 
@@ -139,7 +166,13 @@ ch-go's actually-supported set. M-INSERT then unlocks the write side.
 - **Every column implements `IColumnResult`** (Type, Rows, Reset,
   Decode/EncodeColumn). For columns with a typed value type, also
   `IColumnOf<'T>` (Append+Row). For columns with a per-block state header
-  (only LowCardinality so far), `IStatefulColumn`.
+  (LowCardinality, JSON, Tuple-of-stateful), `IStatefulColumn`. For
+  columns whose layout/scale/map depends on the server-sent parameterised
+  type string (Enum, Interval, future DateTime tz), `IInferable`.
+- **Server-sent type strings may differ from the client's `Type`.** The
+  `ColumnType.normalize` regex in `Columns.fs` folds `Decimal(P, S)` →
+  `Decimal{32,64,128,256}` and `Enum8(…)` / `Enum16(…)` → bare form.
+  Extend that table when adding a new parameterised column.
 - **No `not null` unless the type actually requires it** — `not null` propagates
   to callers via F# Nullable=enable. Only LC needs it (Dictionary key).
 - **Buffer growth must preserve contents** — use `Array.Resize(&buf, newCap)`,
