@@ -30,6 +30,7 @@
     <Compile Include="ColEnum.fs" />
     <Compile Include="ColPoint.fs" />
     <Compile Include="ColNothing.fs" />
+    <Compile Include="ColInterval.fs" />
   </ItemGroup>
 
 </Project>
