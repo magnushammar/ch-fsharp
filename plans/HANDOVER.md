@@ -18,29 +18,23 @@ improve them (and log departures in DESIGN_CHOICES.md when we do).
 
 ## Where we are
 
-64 commits in. Recent run added:
+73 commits in. Recent run added:
 
 ```
-c042eaf  Extend --mixed bench to JSON column with required server settings
-a61c464  Add ColJSONStr: String wire + UInt64 serialization-version state header
-7b54ac0  Extend --mixed bench to IntervalDay column
-5ad6ac8  Add ColInterval: Int64 wire + 8-scale IntervalScale tag
-7b02f3e  Extend --mixed bench to Point column
-e1dc7c5  Add ColPoint (Geo) and ColNothing (Nullable(Nothing))
-a5b5165  Extend --mixed bench to Enum8 column
-792a808  Add ColEnum8/16 + IInferable; normalize strips Enum parameters
-d6c113d  Extend --mixed bench to Decimal(9, 2)
-6d36090  Add ColDecimal32/64/128 + ColumnType.normalize for Decimal(P, S)
-ed65950  Extend --mixed bench smoke to Tuple(String, Int32) column
-8018be5  Add ColTuple + ColNamed: heterogeneous columns side by side
-085a6b4  Extend --mixed bench smoke to Map(String, String) column
-035b8d8  Add ColMap<'K, 'V>: Offsets + parallel keys/values inner columns
+7ccf0fe  Add CompressedFrame.wrapLZ4; use for INSERT data blocks under compression
+ce87726  Extend --mixed bench to BFloat16 column
+a47a3f9  Add ColBFloat16: UInt16 wire + float32 convenience helpers
+459a767  Add Int256 / UInt256 / Decimal256 via a custom 32-byte struct
+82d9ab7  Refresh HANDOVER: INSERT done; next milestones are Int256, LC(FixedString), ColAuto
+c5bd507  Add INSERT support: ChQuery.Input + EncodeDataBlock + send/recv flow
+… (Point/Nothing/Interval/JSON/Enum/Decimal/Tuple/Map earlier)
 ```
 
-**160/160 tests pass.** Live multi-type SELECT works end-to-end via
+**171/171 tests pass.** Live multi-type SELECT works end-to-end via
 `/tmp/ch-bench-fs/Ch.Bench.Numbers --mixed` against `localhost:9000`,
-exercising 12 result columns including Map, Tuple, Decimal, Enum8,
-Point, IntervalDay and JSON.
+exercising 13 result columns through Map, Tuple, Decimal, Enum8, Point,
+IntervalDay, JSON, and BFloat16. `--insert` round-trips four rows
+through a Memory-engine table both with and without LZ4 compression.
 
 ## Repo map
 
@@ -71,6 +65,9 @@ src/Ch.Proto/                            wire primitives + columns
   ColNothing.fs                           Nothing (for Nullable(Nothing))
   ColInterval.fs                          Interval{Second..Year}
   ColJSONStr.fs                           JSON (String wire + version state header)
+  ColBFloat16.fs                          BFloat16 (UInt16 wire + float32 helpers)
+  ColDecimal.fs                           Decimal{32,64,128,256} + scaling helpers
+  Int256.fs                               Int256 / UInt256 32-byte structs
 src/Ch.Client/                           connection lifecycle
   Options.fs                              ChOptions record
   Client.fs                               Connect/Ping/Do, state dispatch
@@ -105,15 +102,15 @@ RESULTS.md                               bench numbers + analysis
 | Array(T) (recursive) | ✅ |
 | Map(K, V) | ✅ |
 | Tuple(T1, …, Tn) + ColNamed | ✅ |
-| Decimal32/64/128 | ✅ |
+| Decimal32/64/128/256 | ✅ |
 | Enum8 / Enum16 (+ IInferable) | ✅ |
 | Point (Geo) | ✅ |
 | Nothing / Nullable(Nothing) | ✅ |
 | Interval{Second..Year} | ✅ |
 | JSON (string serialization v1) | ✅ |
-| Decimal256 | ⛔ (no Int256 yet) |
-| Int256, UInt256 | ⛔ (no .NET native) |
-| BFloat16 | ⛔ |
+| Int256, UInt256 (custom 32-byte struct) | ✅ |
+| BFloat16 (float32 helpers) | ✅ |
+| LZ4 framing on INSERT bodies | ✅ |
 | Time / Time64 | ⛔ (server here doesn't have it) |
 | LowCardinality(FixedString) | ⛔ (needs content-hash IEqualityComparer) |
 | ColAuto inference | ⛔ |
@@ -126,33 +123,35 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **Int256 / UInt256** (then Decimal256): needs a 32-byte struct in F#
-   with the right `MemoryMarshal` layout. Without `System.Int256`, easiest
-   path is an explicit struct of 4 × `UInt64` little-endian + arithmetic
-   helpers as needed. Read/write are still single `ReadFull`/`PutRaw`.
+1. **ColAuto inference**: routes the server-sent type string through a
+   factory that builds the right concrete column. Useful as a high-level
+   convenience; not perf-critical. Primitives + parameterised types
+   (`Decimal(P,S)`, `Enum{8,16}`, `DateTime64(N)`, `Interval{Scale}`) are
+   straightforward via a string-switch dispatch. Composites
+   (`Array(T)`, `Nullable(T)`, `Map(K,V)`, …) need either reflection or
+   non-generic column variants — pick one approach. ch-go reference:
+   `proto/col_auto.go`.
 
 2. **LowCardinality(FixedString)**: needs an `IEqualityComparer<byte[]>`
-   that hashes content (FNV-1a or xxhash). ColLowCardinality's dedup
-   Dictionary currently uses default reference equality, which would
-   never deduplicate byte arrays.
+   that hashes content (FNV-1a or xxhash) and a `ColFixedStr` that
+   implements `IColumnOf<byte[]>` (currently it only does
+   `IColumnResult` + raw `AppendBytes`/`RowSpan`). API impact is
+   moderate — see DESIGN_CHOICES if you take this on.
 
-3. **ColAuto inference**: routes the server-sent type string through a
-   factory that builds the right concrete column. Useful as a high-level
-   convenience; not perf-critical. ch-go reference: `proto/col_auto.go`.
+3. **Connection pool**: ch-go has it in a separate `chpool` package and
+   explicitly disclaims it as out-of-core. Worth a small F# port for
+   server workloads but not perf-critical for the driver itself.
 
-4. **BFloat16**: needs a custom 16-bit struct with the BFloat16 bit layout
-   (1 sign + 8 exponent + 7 mantissa, distinct from .NET `Half`). ch-go
-   reference: `proto/col_bfloat16.go`.
+4. **Query cancellation watchdog**: a `Task`-side fiber that fires
+   `ClientCodeCancel` when the user's `CancellationToken` flips. Today
+   we plumb the `CancellationToken` through but never proactively send
+   Cancel.
 
-5. **LZ4 framing for INSERT bodies**: today `EncodeDataBlock` uses
-   `CompressedFrame.wrapNone` even when `opts.Compression = true`, which
-   matches the cheap-path for blank blocks but throws away the LZ4 win
-   on large inputs. Wire the `LZ4Codec` encoder in to mirror the SELECT
-   decode path.
+5. **ZSTD compression**: LZ4 covers the dominant case. ZSTD adds another
+   K4os dependency and a method=0x90 encode/decode branch.
 
-The deferred entries below the next-up list are increasingly niche —
-the column suite already covers ch-go's actually-supported set
-bidirectionally.
+The column suite already covers ch-go's supported set bidirectionally
+(read + write) including LZ4 framing on both sides.
 
 ## Conventions to follow
 
