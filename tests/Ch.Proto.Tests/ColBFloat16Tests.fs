@@ -2,50 +2,48 @@ module Ch.Proto.Tests.ColBFloat16Tests
 
 open System
 open System.IO
-open Xunit
+open Expecto
 open Ch.Proto
 
-[<Theory>]
-[<InlineData(0.0f, 0us)>]
-[<InlineData(1.0f, 0x3F80us)>]
-[<InlineData(-1.0f, 0xBF80us)>]
-[<InlineData(1.5f, 0x3FC0us)>]
-[<InlineData(2.0f, 0x4000us)>]
-let ``BFloat16 known-value roundtrip via AppendFloat / RowFloat`` (value: float32, expectedBF: uint16) =
-    let col = ColBFloat16()
-    col.AppendFloat(value)
-    Assert.Equal(expectedBF, col.Row(0))
-    Assert.Equal(value, col.RowFloat(0))
+[<Tests>]
+let tests = testList "ColBFloat16" [
+    testList "known-value roundtrip" [
+        for (value, expectedBF) in
+            [ (0.0f, 0us); (1.0f, 0x3F80us); (-1.0f, 0xBF80us)
+              (1.5f, 0x3FC0us); (2.0f, 0x4000us) ] ->
+            testCase $"v={value}" <| fun _ ->
+                let col = ColBFloat16()
+                col.AppendFloat(value)
+                Expect.equal (col.Row(0)) expectedBF "raw BFloat16 bits"
+                Expect.equal (col.RowFloat(0)) value "RowFloat round-trip"
+    ]
 
-[<Fact>]
-let ``ColBFloat16 multi-row encode round-trips`` () =
-    let col = ColBFloat16()
-    let values = [| 0.0f; 1.0f; -1.0f; 2.5f; 3.14f; -0.5f; 1024.0f |]
-    for v in values do col.AppendFloat(v)
+    testCase "multi-row encode round-trips" <| fun _ ->
+        let col = ColBFloat16()
+        let values = [| 0.0f; 1.0f; -1.0f; 2.5f; 3.14f; -0.5f; 1024.0f |]
+        for v in values do col.AppendFloat(v)
 
-    Assert.Equal(values.Length, col.Rows)
-    Assert.Equal("BFloat16", col.Type)
+        Expect.equal col.Rows values.Length "rows"
+        Expect.equal col.Type "BFloat16" "type"
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
-    // 2 bytes per row.
-    Assert.Equal(values.Length * 2, buf.WrittenSpan.Length)
+        let buf = Buf()
+        col.EncodeColumn(buf)
+        Expect.equal buf.WrittenSpan.Length (values.Length * 2) "encoded length"
 
-    let dec = ColBFloat16()
-    let ms = new MemoryStream(buf.WrittenSpan.ToArray())
-    dec.DecodeColumn(Reader(ms), values.Length)
+        let dec = ColBFloat16()
+        let ms = new MemoryStream(buf.WrittenSpan.ToArray())
+        dec.DecodeColumn(Reader(ms), values.Length)
 
-    for i in 0 .. values.Length - 1 do
-        // Round-trip is lossy by design — BFloat16 has 7 mantissa bits, so
-        // we compare with a small relative tolerance against the original.
-        let dec' = dec.RowFloat(i)
-        Assert.True(MathF.Abs(values.[i] - dec') <= MathF.Abs(values.[i]) * 0.01f + 0.01f,
-            sprintf "row %d: expected ~%f got %f" i values.[i] dec')
+        for i in 0 .. values.Length - 1 do
+            let dec' = dec.RowFloat(i)
+            Expect.isTrue
+                (MathF.Abs(values.[i] - dec') <= MathF.Abs(values.[i]) * 0.01f + 0.01f)
+                (sprintf "row %d: expected ~%f got %f" i values.[i] dec')
 
-[<Fact>]
-let ``BFloat16 preserves zeros and small integers exactly`` () =
-    let col = ColBFloat16()
-    let values = [| 0.0f; 1.0f; 2.0f; 4.0f; 8.0f; 16.0f; -1.0f; -2.0f |]
-    for v in values do col.AppendFloat(v)
-    for i in 0 .. values.Length - 1 do
-        Assert.Equal(values.[i], col.RowFloat(i))
+    testCase "preserves zeros and small integers exactly" <| fun _ ->
+        let col = ColBFloat16()
+        let values = [| 0.0f; 1.0f; 2.0f; 4.0f; 8.0f; 16.0f; -1.0f; -2.0f |]
+        for v in values do col.AppendFloat(v)
+        for i in 0 .. values.Length - 1 do
+            Expect.equal (col.RowFloat(i)) values.[i] "row"
+]

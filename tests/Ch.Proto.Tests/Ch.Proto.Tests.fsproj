@@ -1,8 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Expecto is a console runner; we don't use Microsoft.NET.Test.Sdk. -->
+    <IsTestProject>false</IsTestProject>
+    <RootNamespace>Ch.Proto.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,13 +31,11 @@
     <Compile Include="ColBFloat16Tests.fs" />
     <Compile Include="ColAutoTests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
+    <Compile Include="Program.fs" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.4" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="Expecto" Version="10.2.1" />
   </ItemGroup>
 
   <ItemGroup>

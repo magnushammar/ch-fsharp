@@ -3,7 +3,7 @@ module Ch.Proto.Tests.ColStrTests
 open System
 open System.IO
 open System.Text
-open Xunit
+open Expecto
 open Ch.Proto
 
 let private goldenPath (name: string) : string =
@@ -14,101 +14,91 @@ let private goldenPath (name: string) : string =
                 "..", "..", "..", "..", "..",
                 "reference", "ch-go", "proto", "_golden",
                 $"{name}.raw"))
-    if not (File.Exists p) then
-        failwith $"golden fixture not found: {p}"
+    if not (File.Exists p) then failwithf "golden fixture not found: %s" p
     p
 
-/// Port of `proto/col_str_test.go: TestColStr_EncodeColumn`.
-[<Fact>]
-let ``ColStr encodes 6-row sample against col_str golden`` () =
-    let input = [| "foo"; "bar"; "ClickHouse"; "one"; ""; "1" |]
-    let col = ColStr()
-    for s in input do
-        col.Append(s)
-    Assert.Equal(input.Length, col.Rows)
-    for i in 0 .. input.Length - 1 do
-        Assert.Equal(input.[i], col.Row(i))
+[<Tests>]
+let tests = testList "ColStr" [
+    testCase "encodes 6-row sample against col_str golden" <| fun _ ->
+        let input = [| "foo"; "bar"; "ClickHouse"; "one"; ""; "1" |]
+        let col = ColStr()
+        for s in input do col.Append(s)
+        Expect.equal col.Rows input.Length "rows"
+        for i in 0 .. input.Length - 1 do
+            Expect.equal (col.Row(i)) input.[i] "row"
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
-    let expected = File.ReadAllBytes(goldenPath "col_str")
-    Assert.Equal<byte array>(expected, buf.WrittenSpan.ToArray())
+        let buf = Buf()
+        col.EncodeColumn(buf)
+        let expected = File.ReadAllBytes(goldenPath "col_str")
+        Expect.equal (buf.WrittenSpan.ToArray()) expected "encoded bytes"
 
-    let ms = new MemoryStream(expected)
-    let r = Reader(ms)
-    let dec = ColStr()
-    dec.DecodeColumn(r, input.Length)
-    Assert.Equal(input.Length, dec.Rows)
-    for i in 0 .. input.Length - 1 do
-        Assert.Equal(input.[i], dec.Row(i))
+        let ms = new MemoryStream(expected)
+        let r = Reader(ms)
+        let dec = ColStr()
+        dec.DecodeColumn(r, input.Length)
+        Expect.equal dec.Rows input.Length "decoded rows"
+        for i in 0 .. input.Length - 1 do
+            Expect.equal (dec.Row(i)) input.[i] "decoded row"
 
-/// Port of `proto/col_str_test.go: TestColStr_AppendBytes`.
-[<Fact>]
-let ``ColStr.AppendBytes round-trips against col_str_bytes golden`` () =
-    let col = ColStr()
-    col.AppendBytes(ReadOnlySpan(Encoding.UTF8.GetBytes("Hello, World!")))
-    col.AppendBytes(ReadOnlySpan(Encoding.UTF8.GetBytes("ClickHouse")))
-    Assert.Equal(2, col.Rows)
+    testCase "AppendBytes round-trips against col_str_bytes golden" <| fun _ ->
+        let col = ColStr()
+        col.AppendBytes(ReadOnlySpan(Encoding.UTF8.GetBytes("Hello, World!")))
+        col.AppendBytes(ReadOnlySpan(Encoding.UTF8.GetBytes("ClickHouse")))
+        Expect.equal col.Rows 2 "rows"
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
-    let expected = File.ReadAllBytes(goldenPath "col_str_bytes")
-    Assert.Equal<byte array>(expected, buf.WrittenSpan.ToArray())
+        let buf = Buf()
+        col.EncodeColumn(buf)
+        let expected = File.ReadAllBytes(goldenPath "col_str_bytes")
+        Expect.equal (buf.WrittenSpan.ToArray()) expected "encoded bytes"
 
-    let ms = new MemoryStream(expected)
-    let r = Reader(ms)
-    let dec = ColStr()
-    dec.DecodeColumn(r, 2)
-    Assert.Equal("Hello, World!", dec.Row(0))
-    Assert.Equal("ClickHouse", dec.Row(1))
+        let ms = new MemoryStream(expected)
+        let r = Reader(ms)
+        let dec = ColStr()
+        dec.DecodeColumn(r, 2)
+        Expect.equal (dec.Row(0)) "Hello, World!" "row 0"
+        Expect.equal (dec.Row(1)) "ClickHouse" "row 1"
 
-[<Fact>]
-let ``ColStr handles empty strings`` () =
-    let col = ColStr()
-    col.Append("")
-    col.Append("")
-    col.Append("")
-    Assert.Equal(3, col.Rows)
-    Assert.Equal("", col.Row(0))
-    Assert.Equal("", col.Row(1))
-    Assert.Equal("", col.Row(2))
+    testCase "handles empty strings" <| fun _ ->
+        let col = ColStr()
+        col.Append(""); col.Append(""); col.Append("")
+        Expect.equal col.Rows 3 "rows"
+        Expect.equal (col.Row(0)) "" "row 0"
+        Expect.equal (col.Row(1)) "" "row 1"
+        Expect.equal (col.Row(2)) "" "row 2"
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
-    // 3 × uvarint(0) = 3 bytes of 0x00
-    Assert.Equal<byte array>([| 0uy; 0uy; 0uy |], buf.WrittenSpan.ToArray())
+        let buf = Buf()
+        col.EncodeColumn(buf)
+        Expect.equal (buf.WrittenSpan.ToArray()) [| 0uy; 0uy; 0uy |] "encoded bytes"
 
-[<Fact>]
-let ``ColStr handles UTF-8 multi-byte characters`` () =
-    let col = ColStr()
-    col.Append("café")           // 5 UTF-8 bytes (é is 2)
-    col.Append("日本語")          // 9 UTF-8 bytes
-    col.Append("🚀ClickHouse")   // 4 + 10 = 14 UTF-8 bytes (🚀 is 4)
-    Assert.Equal(3, col.Rows)
+    testCase "handles UTF-8 multi-byte characters" <| fun _ ->
+        let col = ColStr()
+        col.Append("café")
+        col.Append("日本語")
+        col.Append("🚀ClickHouse")
+        Expect.equal col.Rows 3 "rows"
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
+        let buf = Buf()
+        col.EncodeColumn(buf)
 
-    let ms = new MemoryStream(buf.WrittenSpan.ToArray())
-    let r = Reader(ms)
-    let dec = ColStr()
-    dec.DecodeColumn(r, 3)
-    Assert.Equal("café", dec.Row(0))
-    Assert.Equal("日本語", dec.Row(1))
-    Assert.Equal("🚀ClickHouse", dec.Row(2))
+        let ms = new MemoryStream(buf.WrittenSpan.ToArray())
+        let r = Reader(ms)
+        let dec = ColStr()
+        dec.DecodeColumn(r, 3)
+        Expect.equal (dec.Row(0)) "café" "row 0"
+        Expect.equal (dec.Row(1)) "日本語" "row 1"
+        Expect.equal (dec.Row(2)) "🚀ClickHouse" "row 2"
 
-[<Fact>]
-let ``ColStr Reset preserves capacity`` () =
-    let col = ColStr()
-    col.Append("hello")
-    col.Append("world")
-    let cap = col.RawData.Length
+    testCase "Reset preserves capacity" <| fun _ ->
+        let col = ColStr()
+        col.Append("hello"); col.Append("world")
+        let cap = col.RawData.Length
 
-    col.Reset()
-    Assert.Equal(0, col.Rows)
-    Assert.Equal(0, col.DataLength)
-    Assert.Equal(cap, col.RawData.Length)
+        col.Reset()
+        Expect.equal col.Rows 0 "rows after reset"
+        Expect.equal col.DataLength 0 "data length after reset"
+        Expect.equal col.RawData.Length cap "capacity preserved"
 
-    col.Append("again")
-    Assert.Equal(1, col.Rows)
-    Assert.Equal("again", col.Row(0))
+        col.Append("again")
+        Expect.equal col.Rows 1 "rows after re-append"
+        Expect.equal (col.Row(0)) "again" "row 0"
+]

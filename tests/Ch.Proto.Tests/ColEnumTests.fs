@@ -1,8 +1,9 @@
 module Ch.Proto.Tests.ColEnumTests
 
 open System
+open System.Collections.Generic
 open System.IO
-open Xunit
+open Expecto
 open Ch.Proto
 
 let private goldenPath (name: string) : string =
@@ -13,102 +14,87 @@ let private goldenPath (name: string) : string =
                 "..", "..", "..", "..", "..",
                 "reference", "ch-go", "proto", "_golden",
                 $"{name}.raw"))
-    if not (File.Exists p) then
-        failwith $"golden fixture not found: {p}"
+    if not (File.Exists p) then failwithf "golden fixture not found: %s" p
     p
 
-/// Wire bytes for Enum8 are identical to Int8 — 50 rows of `i` little-endian.
-/// Uses AppendRaw to skip the name map, matching ch-go's
-/// `proto/col_enum8_gen_test.go`.
-[<Fact>]
-let ``ColEnum8 raw 50-row sample matches col_enum8 golden`` () =
-    let col = ColEnum8()
-    for i in 0 .. 49 do col.AppendRaw(int8 i)
+[<Tests>]
+let tests = testList "ColEnum" [
+    testCase "ColEnum8 raw 50-row sample matches col_enum8 golden" <| fun _ ->
+        let col = ColEnum8()
+        for i in 0 .. 49 do col.AppendRaw(int8 i)
+        Expect.equal col.Rows 50 "rows"
 
-    Assert.Equal(50, col.Rows)
+        let buf = Buf()
+        col.EncodeColumn(buf)
+        let expected = File.ReadAllBytes(goldenPath "col_enum8")
+        Expect.equal (buf.WrittenSpan.ToArray()) expected "encoded bytes"
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
-    let expected = File.ReadAllBytes(goldenPath "col_enum8")
-    Assert.Equal<byte array>(expected, buf.WrittenSpan.ToArray())
+    testCase "ColEnum16 raw 50-row sample matches col_enum16 golden" <| fun _ ->
+        let col = ColEnum16()
+        for i in 0 .. 49 do col.AppendRaw(int16 i)
+        Expect.equal col.Rows 50 "rows"
 
-[<Fact>]
-let ``ColEnum16 raw 50-row sample matches col_enum16 golden`` () =
-    let col = ColEnum16()
-    for i in 0 .. 49 do col.AppendRaw(int16 i)
+        let buf = Buf()
+        col.EncodeColumn(buf)
+        let expected = File.ReadAllBytes(goldenPath "col_enum16")
+        Expect.equal (buf.WrittenSpan.ToArray()) expected "encoded bytes"
 
-    Assert.Equal(50, col.Rows)
+    testCase "ColEnum8 round-trips through name API with pre-declared mapping" <| fun _ ->
+        let col = ColEnum8([| "off", 0y; "on", 1y; "dim", 2y |])
+        col.Append("off"); col.Append("on"); col.Append("dim"); col.Append("on")
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
-    let expected = File.ReadAllBytes(goldenPath "col_enum16")
-    Assert.Equal<byte array>(expected, buf.WrittenSpan.ToArray())
+        Expect.equal col.Rows 4 "rows"
+        Expect.equal col.Type "Enum8('off' = 0, 'on' = 1, 'dim' = 2)" "type"
 
-[<Fact>]
-let ``ColEnum8 round-trips through name API with pre-declared mapping`` () =
-    let col = ColEnum8([| "off", 0y; "on", 1y; "dim", 2y |])
-    col.Append("off")
-    col.Append("on")
-    col.Append("dim")
-    col.Append("on")
+        let buf = Buf()
+        col.EncodeColumn(buf)
 
-    Assert.Equal(4, col.Rows)
-    Assert.Equal("Enum8('off' = 0, 'on' = 1, 'dim' = 2)", col.Type)
+        let dec = ColEnum8([| "off", 0y; "on", 1y; "dim", 2y |])
+        let ms = new MemoryStream(buf.WrittenSpan.ToArray())
+        dec.DecodeColumn(Reader(ms), 4)
 
-    let buf = Buf()
-    col.EncodeColumn(buf)
+        Expect.equal (dec.Row(0)) "off" "row 0"
+        Expect.equal (dec.Row(1)) "on" "row 1"
+        Expect.equal (dec.Row(2)) "dim" "row 2"
+        Expect.equal (dec.Row(3)) "on" "row 3"
 
-    let dec = ColEnum8([| "off", 0y; "on", 1y; "dim", 2y |])
-    let ms = new MemoryStream(buf.WrittenSpan.ToArray())
-    dec.DecodeColumn(Reader(ms), 4)
+    testCase "ColEnum8 Infer populates the mapping from a server type string" <| fun _ ->
+        let col = ColEnum8()
+        col.Infer("Enum8('idle' = 0, 'running' = 1, 'done' = 2)")
+        Expect.equal col.Type "Enum8('idle' = 0, 'running' = 1, 'done' = 2)" "type"
+        Expect.equal (col.NameToValue.["idle"]) 0y "idle"
+        Expect.equal (col.ValueToName.[1y]) "running" "1y"
 
-    Assert.Equal("off", dec.Row(0))
-    Assert.Equal("on", dec.Row(1))
-    Assert.Equal("dim", dec.Row(2))
-    Assert.Equal("on", dec.Row(3))
+        col.AppendRaw(2y)
+        Expect.equal (col.Row(0)) "done" "row 0"
 
-[<Fact>]
-let ``ColEnum8 Infer populates the mapping from a server type string`` () =
-    let col = ColEnum8()
-    col.Infer("Enum8('idle' = 0, 'running' = 1, 'done' = 2)")
-    Assert.Equal("Enum8('idle' = 0, 'running' = 1, 'done' = 2)", col.Type)
-    Assert.Equal(0y, col.NameToValue.["idle"])
-    Assert.Equal("running", col.ValueToName.[1y])
+    testCase "ColEnum16 Infer handles negative wire values" <| fun _ ->
+        let col = ColEnum16()
+        col.Infer("Enum16('neg' = -10, 'zero' = 0, 'pos' = 32000)")
+        Expect.equal (col.NameToValue.["neg"]) -10s "neg"
+        Expect.equal (col.ValueToName.[32000s]) "pos" "pos"
 
-    col.AppendRaw(2y)
-    Assert.Equal("done", col.Row(0))
+    testCase "ColEnum8 Append throws for unknown name" <| fun _ ->
+        let col = ColEnum8([| "a", 1y |])
+        Expect.throwsT<KeyNotFoundException>
+            (fun () -> col.Append("missing"))
+            "missing name"
 
-[<Fact>]
-let ``ColEnum16 Infer handles negative wire values`` () =
-    let col = ColEnum16()
-    col.Infer("Enum16('neg' = -10, 'zero' = 0, 'pos' = 32000)")
-    Assert.Equal(-10s, col.NameToValue.["neg"])
-    Assert.Equal("pos", col.ValueToName.[32000s])
+    testCase "ColEnum8 Reset clears values but preserves mapping" <| fun _ ->
+        let col = ColEnum8([| "a", 1y; "b", 2y |])
+        col.Append("a"); col.Append("b")
+        Expect.equal col.Rows 2 "rows pre-reset"
 
-[<Fact>]
-let ``ColEnum8 Append throws for unknown name`` () =
-    let col = ColEnum8([| "a", 1y |])
-    Assert.Throws<System.Collections.Generic.KeyNotFoundException>(
-        fun () -> col.Append("missing")
-    ) |> ignore
+        col.Reset()
+        Expect.equal col.Rows 0 "rows"
+        col.Append("a")
+        Expect.equal col.Rows 1 "rows post-reappend"
+        Expect.equal (col.Row(0)) "a" "row 0"
 
-[<Fact>]
-let ``ColEnum8 Reset clears values but preserves mapping`` () =
-    let col = ColEnum8([| "a", 1y; "b", 2y |])
-    col.Append("a"); col.Append("b")
-    Assert.Equal(2, col.Rows)
-
-    col.Reset()
-    Assert.Equal(0, col.Rows)
-    // Mapping survives, can still append.
-    col.Append("a")
-    Assert.Equal(1, col.Rows)
-    Assert.Equal("a", col.Row(0))
-
-[<Fact>]
-let ``ColumnType normalize strips Enum parameters`` () =
-    Assert.Equal("Enum8", ColumnType.normalize "Enum8('a' = 1, 'b' = 2)")
-    Assert.Equal("Enum16", ColumnType.normalize "Enum16('x' = 10, 'y' = 20)")
-    Assert.Equal("Array(Enum8)", ColumnType.normalize "Array(Enum8('a' = 1))")
-    Assert.True(ColumnType.isCompatible "Enum8" "Enum8('a' = 1, 'b' = 2)")
-    Assert.True(ColumnType.isCompatible "Enum16" "Enum16('foo' = 0)")
+    testCase "ColumnType.normalize strips Enum parameters" <| fun _ ->
+        Expect.equal (ColumnType.normalize "Enum8('a' = 1, 'b' = 2)") "Enum8" "enum8"
+        Expect.equal (ColumnType.normalize "Enum16('x' = 10, 'y' = 20)") "Enum16" "enum16"
+        Expect.equal (ColumnType.normalize "Array(Enum8('a' = 1))") "Array(Enum8)" "array of enum"
+        Expect.isTrue (ColumnType.isCompatible "Enum8" "Enum8('a' = 1, 'b' = 2)") "enum8 compat"
+        Expect.isTrue (ColumnType.isCompatible "Enum16" "Enum16('foo' = 0)") "enum16 compat"
+]

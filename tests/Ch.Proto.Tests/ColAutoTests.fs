@@ -2,112 +2,98 @@ module Ch.Proto.Tests.ColAutoTests
 
 open System
 open System.IO
-open Xunit
+open Expecto
 open Ch.Proto
 
-[<Theory>]
-[<InlineData("Int32")>]
-[<InlineData("Int64")>]
-[<InlineData("UInt8")>]
-[<InlineData("UInt256")>]
-[<InlineData("Float64")>]
-[<InlineData("Bool")>]
-[<InlineData("String")>]
-[<InlineData("JSON")>]
-[<InlineData("Date")>]
-[<InlineData("Date32")>]
-[<InlineData("DateTime")>]
-[<InlineData("UUID")>]
-[<InlineData("IPv4")>]
-[<InlineData("IPv6")>]
-[<InlineData("Point")>]
-[<InlineData("Nothing")>]
-[<InlineData("BFloat16")>]
-let ``ColAuto.build dispatches scalar primitives`` (typeStr: string) =
-    let col = ColAuto.build typeStr
-    Assert.Equal(typeStr, col.Type)
+[<Tests>]
+let tests = testList "ColAuto" [
+    testList "build dispatches scalar primitives" [
+        for typeStr in
+            [ "Int32"; "Int64"; "UInt8"; "UInt256"; "Float64"; "Bool"
+              "String"; "JSON"; "Date"; "Date32"; "DateTime"
+              "UUID"; "IPv4"; "IPv6"; "Point"; "Nothing"; "BFloat16" ] ->
+            testCase typeStr <| fun _ ->
+                let col = ColAuto.build typeStr
+                Expect.equal col.Type typeStr "type"
+    ]
 
-[<Theory>]
-[<InlineData("Decimal(9, 2)", "Decimal32")>]
-[<InlineData("Decimal(18, 4)", "Decimal64")>]
-[<InlineData("Decimal(38, 8)", "Decimal128")>]
-[<InlineData("Decimal(76, 0)", "Decimal256")>]
-[<InlineData("Decimal32", "Decimal32")>]
-[<InlineData("Decimal64", "Decimal64")>]
-let ``ColAuto.build downcasts Decimal(P, S) to the right width`` (input: string, expected: string) =
-    let col = ColAuto.build input
-    Assert.Equal(expected, col.Type)
+    testList "build downcasts Decimal(P, S) to the right width" [
+        for (input, expected) in
+            [ "Decimal(9, 2)", "Decimal32"
+              "Decimal(18, 4)", "Decimal64"
+              "Decimal(38, 8)", "Decimal128"
+              "Decimal(76, 0)", "Decimal256"
+              "Decimal32", "Decimal32"
+              "Decimal64", "Decimal64" ] ->
+            testCase input <| fun _ ->
+                let col = ColAuto.build input
+                Expect.equal col.Type expected "type"
+    ]
 
-[<Fact>]
-let ``ColAuto.build Enum8 parses the mapping`` () =
-    let col = ColAuto.build "Enum8('off' = 0, 'on' = 1, 'dim' = 2)"
-    let en = col :?> ColEnum8
-    Assert.Equal(0y, en.NameToValue.["off"])
-    Assert.Equal("dim", en.ValueToName.[2y])
-    Assert.Equal("Enum8('off' = 0, 'on' = 1, 'dim' = 2)", col.Type)
+    testCase "build Enum8 parses the mapping" <| fun _ ->
+        let col = ColAuto.build "Enum8('off' = 0, 'on' = 1, 'dim' = 2)"
+        let en = col :?> ColEnum8
+        Expect.equal (en.NameToValue.["off"]) 0y "off"
+        Expect.equal (en.ValueToName.[2y]) "dim" "2y"
+        Expect.equal col.Type "Enum8('off' = 0, 'on' = 1, 'dim' = 2)" "type"
 
-[<Fact>]
-let ``ColAuto.build DateTime64 parses precision and strips timezone`` () =
-    let col1 = ColAuto.build "DateTime64(3)"
-    let dt1 = col1 :?> ColDateTime64
-    Assert.Equal(3, dt1.Precision)
+    testCase "build DateTime64 parses precision and strips timezone" <| fun _ ->
+        let col1 = ColAuto.build "DateTime64(3)"
+        let dt1 = col1 :?> ColDateTime64
+        Expect.equal dt1.Precision 3 "precision 3"
 
-    let col2 = ColAuto.build "DateTime64(9, 'UTC')"
-    let dt2 = col2 :?> ColDateTime64
-    Assert.Equal(9, dt2.Precision)
+        let col2 = ColAuto.build "DateTime64(9, 'UTC')"
+        let dt2 = col2 :?> ColDateTime64
+        Expect.equal dt2.Precision 9 "precision 9"
 
-[<Fact>]
-let ``ColAuto.build FixedString(N) parses width`` () =
-    let col = ColAuto.build "FixedString(8)"
-    Assert.Equal("FixedString(8)", col.Type)
-    let fs = col :?> ColFixedStr
-    Assert.Equal(8, fs.ElemSize)
+    testCase "build FixedString(N) parses width" <| fun _ ->
+        let col = ColAuto.build "FixedString(8)"
+        Expect.equal col.Type "FixedString(8)" "type"
+        let fs = col :?> ColFixedStr
+        Expect.equal fs.ElemSize 8 "elem size"
 
-[<Fact>]
-let ``ColAuto.build Interval picks the scale`` () =
-    let col = ColAuto.build "IntervalDay"
-    let iv = col :?> ColInterval
-    Assert.Equal(Day, iv.Scale)
+    testCase "build Interval picks the scale" <| fun _ ->
+        let col = ColAuto.build "IntervalDay"
+        let iv = col :?> ColInterval
+        Expect.equal iv.Scale Day "scale"
 
-[<Fact>]
-let ``ColAuto.build rejects composite types`` () =
-    Assert.Throws<NotSupportedException>(
-        fun () -> ColAuto.build "Array(Int32)" |> ignore
-    ) |> ignore
-    Assert.Throws<NotSupportedException>(
-        fun () -> ColAuto.build "Nullable(String)" |> ignore
-    ) |> ignore
+    testCase "build rejects composite types" <| fun _ ->
+        Expect.throwsT<NotSupportedException>
+            (fun () -> ColAuto.build "Array(Int32)" |> ignore)
+            "Array"
+        Expect.throwsT<NotSupportedException>
+            (fun () -> ColAuto.build "Nullable(String)" |> ignore)
+            "Nullable"
 
-[<Fact>]
-let ``ColAuto column instance round-trips via Infer + IColumnResult`` () =
-    let auto = ColAuto()
-    let inferable = auto :> IColumnResult
-    let _ = (auto :> IInferable).Infer("Int32")
+    testCase "ColAuto column instance round-trips via Infer + IColumnResult" <| fun _ ->
+        let auto = ColAuto()
+        let inferable = auto :> IColumnResult
+        (auto :> IInferable).Infer("Int32")
 
-    Assert.Equal("Int32", inferable.Type)
-    Assert.Equal(0, inferable.Rows)
+        Expect.equal inferable.Type "Int32" "type"
+        Expect.equal inferable.Rows 0 "rows"
 
-    // Encode some rows via the inner ColInt32.
-    let inner = auto.Inner.Value :?> ColInt32
-    inner.Append(10)
-    inner.Append(20)
-    inner.Append(30)
+        let inner = auto.Inner.Value :?> ColInt32
+        inner.Append(10); inner.Append(20); inner.Append(30)
 
-    let buf = Buf()
-    inferable.EncodeColumn(buf)
-    Assert.Equal(12, buf.WrittenSpan.Length)  // 3 × Int32
+        let buf = Buf()
+        inferable.EncodeColumn(buf)
+        Expect.equal buf.WrittenSpan.Length 12 "encoded length"
 
-    let other = ColAuto()
-    (other :> IInferable).Infer("Int32")
-    let ms = new MemoryStream(buf.WrittenSpan.ToArray())
-    (other :> IColumnResult).DecodeColumn(Reader(ms), 3)
-    let innerB = other.Inner.Value :?> ColInt32
-    Assert.Equal(10, innerB.Row(0))
-    Assert.Equal(20, innerB.Row(1))
-    Assert.Equal(30, innerB.Row(2))
+        let other = ColAuto()
+        (other :> IInferable).Infer("Int32")
+        let ms = new MemoryStream(buf.WrittenSpan.ToArray())
+        (other :> IColumnResult).DecodeColumn(Reader(ms), 3)
+        let innerB = other.Inner.Value :?> ColInt32
+        Expect.equal (innerB.Row(0)) 10 "row 0"
+        Expect.equal (innerB.Row(1)) 20 "row 1"
+        Expect.equal (innerB.Row(2)) 30 "row 2"
 
-[<Fact>]
-let ``ColumnType.normalize strips DateTime / DateTime64 timezones`` () =
-    Assert.Equal("DateTime", ColumnType.normalize "DateTime('UTC')")
-    Assert.Equal("DateTime64(3)", ColumnType.normalize "DateTime64(3, 'UTC')")
-    Assert.Equal("Array(DateTime)", ColumnType.normalize "Array(DateTime('America/New_York'))")
+    testCase "ColumnType.normalize strips DateTime / DateTime64 timezones" <| fun _ ->
+        Expect.equal (ColumnType.normalize "DateTime('UTC')") "DateTime" "DateTime"
+        Expect.equal (ColumnType.normalize "DateTime64(3, 'UTC')") "DateTime64(3)" "DateTime64"
+        Expect.equal
+            (ColumnType.normalize "Array(DateTime('America/New_York'))")
+            "Array(DateTime)"
+            "Array(DateTime)"
+]

@@ -14,12 +14,28 @@
          /// docs on most public surfaces but won't fail the build over the
          odd undocumented helper. -->
     <NoWarn>$(NoWarn);3390</NoWarn>
+
+    <!-- Block NuGet audit. The audit step hits an external advisory feed on
+         every restore — a single slow connection there can stall the build
+         indefinitely (we've seen 13-minute hangs with no CPU usage). We do
+         our own dependency review out-of-band; the in-build call adds zero
+         value and unbounded latency.
+         https://learn.microsoft.com/en-us/nuget/concepts/auditing-packages -->
+    <NuGetAudit>false</NuGetAudit>
+    <!-- Belt-and-suspenders: even if audit is re-enabled somewhere upstream,
+         scope it to direct deps (skip transitives) and fail fast on missing
+         audit sources rather than retrying. -->
+    <NuGetAuditMode>direct</NuGetAuditMode>
+
+    <!-- Skip the "you can opt out of telemetry" banner. Honoring the opt-out
+         itself still requires DOTNET_CLI_TELEMETRY_OPTOUT=1 in the env. -->
+    <DotNetNoLogo>true</DotNetNoLogo>
   </PropertyGroup>
 
   <!-- Shared NuGet package metadata. Per-project files only need to set
        PackageId, Description, and IsPackable. -->
   <PropertyGroup>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>Magnus Hammar</Authors>
     <Company>Latinum</Company>
     <Copyright>Copyright 2026 Magnus Hammar</Copyright>
