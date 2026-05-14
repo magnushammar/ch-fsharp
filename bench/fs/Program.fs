@@ -33,13 +33,19 @@ let main _ =
     let col = ColUInt64()
     let mutable totalSum  = 0UL
     let mutable totalRows = 0L
+    // Diagnostic: accumulate ticks spent in the user-side sum, so we can
+    // split the timed region into driver-time (header parse + socket read)
+    // vs sum-time (this callback, which is bench scaffolding, not driver).
+    let mutable sumTicks = 0L
 
     let onBlock (n: int) =
+        let t0 = Stopwatch.GetTimestamp()
         let span = col.AsSpan()
         let mutable s = 0UL
         for i in 0 .. n - 1 do s <- s + span.[i]
         totalSum  <- totalSum + s
         totalRows <- totalRows + int64 n
+        sumTicks  <- sumTicks + (Stopwatch.GetTimestamp() - t0)
 
     let q =
         { ChQuery.defaults with
@@ -64,5 +70,7 @@ let main _ =
         let gib   = float bytes / 1073741824.0
         let ms    = sw.Elapsed.TotalMilliseconds
         let gbps  = gib / (ms / 1000.0)
-        eprintfn "OK: %d rows | %.2f GiB | %.0f ms | %.2f GiB/s" totalRows gib ms gbps
+        let sumMs = float sumTicks / float Stopwatch.Frequency * 1000.0
+        eprintfn "OK: %d rows | %.2f GiB | %.0f ms | %.2f GiB/s | sum %.0f ms | driver %.0f ms"
+            totalRows gib ms gbps sumMs (ms - sumMs)
         0
