@@ -11,7 +11,7 @@ So the last few days I let Opus port it with me as a cheerleader coming within s
 ### Caveat about our "benching" and my perf numbers
 When running ch-bench on my infra the driver isn't the bottleneck. system.numbers_mt generates rows slower than either client decodes them, so ~300 ms of the ~485 ms is the client just blocked in read(2) waiting on the server.
 
-It feels kind of really fast though ;)
+It feels really fast though ;)
 
 ## What role do I have then, if any?
 
