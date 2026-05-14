@@ -219,9 +219,13 @@ type Client private (
             // 2. End-of-data marker.
             this.EncodeBlankBlock()
 
-            // 3. Flush both packets in one go.
-            do! buf.WriteToAndResetAsync(stream, ct)
-            do! stream.FlushAsync(ct)
+            // 3. Flush both packets in one go. SYNCHRONOUS on purpose — a
+            //    `do!` here would resume the receive loop on a threadpool
+            //    worker, and when that worker blocks in `read(2)` the pool
+            //    injects more threads that spin (sched_yield storm). Running
+            //    the whole task inline on the caller's thread avoids that.
+            buf.WriteToAndReset(stream)
+            stream.Flush()
 
             // 4. Synchronous receive loop. The hot path is `ServerCode.Data`,
             //    everything else is rare/small.
@@ -346,19 +350,38 @@ type Client private (
 
             let tcp = new TcpClient()
             tcp.NoDelay <- true
-            do! tcp.ConnectAsync(host, port, ct)
 
-            let net = tcp.GetStream()
-            let stream : Stream = new BufferedStream(net, 128 * 1024)
+            // SYNCHRONOUS connect — on purpose. `ConnectAsync` registers the
+            // fd with .NET's `SocketAsyncEngine` (epoll). After that, because
+            // the server streams continuously, the fd is permanently
+            // readable and the engine's epoll thread busy-loops
+            // (`epoll_wait` returns instantly forever, finds no pending .NET
+            // async op since we read via raw `read(2)`, re-arms, repeats) —
+            // a `sched_yield` storm. A sync connect never engages the engine,
+            // so it never watches the fd. The whole connect + handshake then
+            // runs inline on the caller's thread; nothing touches the
+            // threadpool.
+            tcp.Connect(host, port)
+            tcp.ReceiveBufferSize <- 16 * 1024 * 1024
+
+            // The fd is driven by true blocking `read(2)` / `write(2)`
+            // (BlockingFdStream) — the kernel parks the thread in-kernel
+            // until data arrives, exactly like Go's netpoller parks a
+            // goroutine. An 8 KB BufferedStream serves the tiny header reads;
+            // column bodies (>= 8 KB) bypass it and land straight in the
+            // destination column buffer — no double-copy.
+            let fd = int (tcp.Client.Handle)
+            let net : Stream = new BlockingFdStream(fd)
+            let stream : Stream = new BufferedStream(net, 8 * 1024)
             let reader = Reader(stream)
             let buf = Buf(512)
 
-            // 1. Send ClientHello
+            // 1. Send ClientHello — synchronous, see above.
             ClientHello.encode buf opts.ClientName
                 opts.ClientMajor opts.ClientMinor Protocol.Version
                 opts.Database opts.User opts.Password
-            do! buf.WriteToAndResetAsync(stream, ct)
-            do! stream.FlushAsync(ct)
+            buf.WriteToAndReset(stream)
+            stream.Flush()
 
             // 2. Read response: Hello or Exception
             let code = reader.ServerCode()
@@ -373,8 +396,8 @@ type Client private (
                 // 3. Send addendum (`proto/feature.go`, FeatureAddendum=54458).
                 //    Quota key, empty.
                 buf.PutString("")
-                do! buf.WriteToAndResetAsync(stream, ct)
-                do! stream.FlushAsync(ct)
+                buf.WriteToAndReset(stream)
+                stream.Flush()
 
                 let localAddr = $"{tcp.Client.LocalEndPoint}"
 

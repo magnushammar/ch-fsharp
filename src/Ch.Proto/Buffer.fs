@@ -98,3 +98,11 @@ type Buf(initialCapacity: int) =
                     this.Reset()
                 }
             ValueTask(t)
+
+    /// Synchronous send + reset. Used by the query path so the receive loop
+    /// runs inline on the caller's thread instead of being resumed on a
+    /// threadpool worker — the latter triggers thread-injection + spin when
+    /// the loop blocks in `read(2)`.
+    member this.WriteToAndReset(stream: Stream) =
+        stream.Write(writer.WrittenSpan)
+        this.Reset()
