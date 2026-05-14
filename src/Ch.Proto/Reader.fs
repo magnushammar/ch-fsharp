@@ -100,6 +100,17 @@ type Reader(rawStream: Stream) =
             this.ReadFullInto(buf.AsSpan())
             Encoding.UTF8.GetString(buf, 0, len)
 
+    /// Skip a length-prefixed string without materialising it. Used on the
+    /// fast block-decode path, where the column name/type were already
+    /// validated on the first block and re-reading them as `string` would
+    /// just churn the GC.
+    member this.SkipStr() =
+        let len = this.Int()
+        if len < 0 then
+            raise (InvalidDataException $"negative string length {len}")
+        elif len > 0 then
+            this.Skip(len)
+
     /// Skip exactly `n` bytes from the stream.
     member this.Skip(n: int) =
         let mutable remaining = n

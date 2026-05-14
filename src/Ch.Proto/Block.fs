@@ -81,6 +81,25 @@ module Block =
             columnHandler name typ rows
         struct (columns, rows)
 
+    /// Like `decode`, but skips materialising the per-column name/type
+    /// strings. Used for every block after the first: the schema was
+    /// validated once on the first block and is identical thereafter, so
+    /// re-allocating the name/type strings and re-running the type-compat
+    /// check every block is pure waste. The callback receives only the row
+    /// count and tracks the column index itself.
+    let decodeFast (reader: Reader) (columnHandler: int -> unit) : struct (int * int) =
+        let _info = BlockInfo.decode reader
+        let columns = reader.Int()
+        let rows = reader.Int()
+        for _ in 0 .. columns - 1 do
+            reader.SkipStr()        // column name — already validated
+            reader.SkipStr()        // column type — already validated
+            let custom = reader.Bool()
+            if custom then
+                raise (InvalidDataException "column has custom serialization (not supported)")
+            columnHandler rows
+        struct (columns, rows)
+
 
 /// Skips a column body off the wire. Knows the wire size of every primitive
 /// type that can appear in `ServerCodeLog` / `ServerProfileEvents` blocks so

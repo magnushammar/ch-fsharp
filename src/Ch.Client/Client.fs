@@ -238,6 +238,72 @@ type Client private (
             let isInsert = not q.Input.IsEmpty
             let mutable headerSeen = false
             let mutable stop = false
+
+            // Per-query-invariant state, hoisted out of the receive loop so
+            // the target arrays and handler closures are allocated once, not
+            // once per block.
+            let resultTargets = List.toArray q.Results
+            let inputTargets  = List.toArray q.Input
+            let mutable colIdx = 0
+            let mutable blockRows = 0
+            // The schema (column names + types) is identical on every block,
+            // so it is fully validated only on the FIRST Data block. After
+            // that, `Block.decodeFast` skips materialising the name/type
+            // strings and we skip the type-compat regex entirely — that
+            // per-block work was ~15k string allocs + ~60k regex ops/run of
+            // pure waste.
+            let mutable schemaValidated = false
+            // Set per slow-path block so the validating handler knows which
+            // target set it's checking and whether to decode the body.
+            let mutable targets : ColumnResult array = resultTargets
+            let mutable insertHeaderMode = false
+
+            // Slow path — first Data block (and the INSERT schema header).
+            // Materialises the name/type strings, runs Infer + type-compat.
+            let validatingHandler : Block.ColumnHandler =
+                fun name typ rowCount ->
+                    if targets.Length = 0 then () else
+                    if colIdx >= targets.Length then
+                        raise (InvalidDataException
+                            $"server sent column [{colIdx}] but only {targets.Length} expected")
+                    let target = targets.[colIdx]
+                    if target.Name <> "" && target.Name <> name then
+                        raise (InvalidDataException
+                            $"column [{colIdx}] name mismatch: server '{name}', expected '{target.Name}'")
+                    // Parameterised columns (Enum8/16, …) infer their mapping
+                    // from the server-sent type string before the compat check.
+                    match target.Column with
+                    | :? IInferable as inf -> inf.Infer(typ)
+                    | _ -> ()
+                    if not (ColumnType.isCompatible target.Column.Type typ) then
+                        raise (InvalidDataException
+                            $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
+                    if not insertHeaderMode then
+                        // State header (e.g. LowCardinality) decodes before
+                        // the body — but only when the block has rows.
+                        if rowCount > 0 then
+                            match target.Column with
+                            | :? IStatefulColumn as s -> s.DecodeState(reader)
+                            | _ -> ()
+                        target.Column.DecodeColumn(reader, rowCount)
+                        blockRows <- rowCount
+                    colIdx <- colIdx + 1
+
+            // Fast path — every Data block after the first. The schema is
+            // already validated and `Block.decodeFast` has skipped the
+            // name/type strings; this just runs the state header + body
+            // decode. Only ever reached for SELECT (the INSERT header always
+            // takes the slow path).
+            let fastHandler (rowCount: int) =
+                let target = resultTargets.[colIdx]
+                if rowCount > 0 then
+                    match target.Column with
+                    | :? IStatefulColumn as s -> s.DecodeState(reader)
+                    | _ -> ()
+                target.Column.DecodeColumn(reader, rowCount)
+                blockRows <- rowCount
+                colIdx <- colIdx + 1
+
             while not stop do
                 let code = reader.ServerCode()
                 match code with
@@ -251,57 +317,30 @@ type Client private (
                         raise (InvalidDataException
                             $"unexpected temp-table name '{tempTable}'")
 
-                    // INSERT header: targets are input columns, but the body
-                    // is empty — we only use the server-supplied type string
-                    // to drive Infer + compat check. SELECT: targets are
-                    // result columns and we decode the body in place.
                     let insertHeader = isInsert && not headerSeen
-                    let targets =
-                        if insertHeader then List.toArray q.Input
-                        else List.toArray q.Results
-                    let mutable colIdx = 0
-                    let mutable blockRows = 0
-
-                    let handler : Block.ColumnHandler =
-                        fun name typ rowCount ->
-                            if targets.Length = 0 then () else
-                            if colIdx >= targets.Length then
-                                raise (InvalidDataException
-                                    $"server sent column [{colIdx}] but only {targets.Length} expected")
-                            let target = targets.[colIdx]
-                            if target.Name <> "" && target.Name <> name then
-                                raise (InvalidDataException
-                                    $"column [{colIdx}] name mismatch: server '{name}', expected '{target.Name}'")
-                            // Parameterised columns (Enum8/16, …) infer
-                            // their full mapping from the server-sent type
-                            // string before the type-compat check, so
-                            // `Enum8('a'=1, …)` matches an unconfigured
-                            // `ColEnum8`.
-                            match target.Column with
-                            | :? IInferable as inf -> inf.Infer(typ)
-                            | _ -> ()
-                            if not (ColumnType.isCompatible target.Column.Type typ) then
-                                raise (InvalidDataException
-                                    $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
-                            if not insertHeader then
-                                // State header (e.g. LowCardinality) decodes
-                                // before the body — but only when the block
-                                // has rows. ch-go `Results.DecodeResult` does
-                                // the same `if b.Rows == 0 then continue`.
-                                if rowCount > 0 then
-                                    match target.Column with
-                                    | :? IStatefulColumn as s -> s.DecodeState(reader)
-                                    | _ -> ()
-                                target.Column.DecodeColumn(reader, rowCount)
-                                blockRows <- rowCount
-                            colIdx <- colIdx + 1
+                    let slowPath = insertHeader || not schemaValidated
+                    colIdx <- 0
+                    blockRows <- 0
+                    if slowPath then
+                        // INSERT header validates against the input columns;
+                        // SELECT against the result columns.
+                        targets <- if insertHeader then inputTargets else resultTargets
+                        insertHeaderMode <- insertHeader
 
                     if opts.Compression then
                         reader.EnableCompression()
-                        try Block.decode reader handler |> ignore
+                        try
+                            if slowPath then Block.decode reader validatingHandler |> ignore
+                            else Block.decodeFast reader fastHandler |> ignore
                         finally reader.DisableCompression()
                     else
-                        Block.decode reader handler |> ignore
+                        if slowPath then Block.decode reader validatingHandler |> ignore
+                        else Block.decodeFast reader fastHandler |> ignore
+
+                    // A validated SELECT block latches the fast path for the
+                    // rest of the query. INSERT keeps the slow path (it only
+                    // ever has the one header block).
+                    if slowPath && not insertHeader then schemaValidated <- true
 
                     if isInsert && not headerSeen then
                         // Server header consumed; now stream our input.
