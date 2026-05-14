@@ -406,12 +406,12 @@ type Client private (
             // The fd is driven by true blocking `read(2)` / `write(2)`
             // (BlockingFdStream) — the kernel parks the thread in-kernel
             // until data arrives, exactly like Go's netpoller parks a
-            // goroutine. An 8 KB BufferedStream serves the tiny header reads;
-            // column bodies (>= 8 KB) bypass it and land straight in the
-            // destination column buffer — no double-copy.
+            // goroutine. The Reader owns an 8 KB buffer for the tiny header
+            // reads; column bodies drain it then read straight into the
+            // destination column buffer — no double-copy, no intermediate
+            // BufferedStream layer. The same handle drives writes.
             let fd = int (tcp.Client.Handle)
-            let net : Stream = new BlockingFdStream(fd)
-            let stream : Stream = new BufferedStream(net, 8 * 1024)
+            let stream : Stream = new BlockingFdStream(fd)
             let reader = Reader(stream)
             let buf = Buf(512)
 

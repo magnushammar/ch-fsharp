@@ -1,16 +1,44 @@
 # ch-fsharp
 
-A low-level, columnar ClickHouse client for F# on .NET 10, ported from
+## The process of getting in range of ch-go
+
+I am very comfortable with F# and like its ergonomics, and a couple of years ago I wrote a very feature-incomplete HTTP driver for ClickHouse to solve the problem of not finding a working .NET driver.
+
+Fast forward to a couple of weeks ago, I decided to vibe port the C++ driver with Opus 4.7. It went quite well, but I also realized that I should have used the Go driver as a template.
+
+So the last few days I let Opus port it with me as a cheerleader coming within some 20% of ch-go's performance on ch-bench. After pushing the model and digging deep for ideas, the driver itself ended up a touch faster than ch-go's on ch-bench — end-to-end it's within a couple percent, and best-run times tie. Something I assumed would be impossible, but here we are."
+
+### Caveat about our "benching" and my perf numbers
+When running ch-bench on my infra the driver isn't the bottleneck. system.numbers_mt generates rows slower than either client decodes them, so ~300 ms of the ~485 ms is the client just blocked in read(2) waiting on the server.
+
+It feels kind of really fast though ;)
+
+## What role do I have then, if any?
+
+It is still a tool. It's an amazing tool but it needs to be supplied with not only the high-level idea but also constant guidance. One of the biggest benefits is speed. I can ask for every crazy tweak and have it discarded or confirmed within minutes. Processing speed and coverage win over careful thought and analysis.
+I am reduced to a manager with intuition about coding, and in this case I also got to learn more about the fundamentals of what makes code performant. I really like this new reality as I was never interested in programming as anything other than a tool to transform data into more useful forms. Now I can do that faster and better.
+
+##  A low level .NET driver
+This is a columnar protocol client, not an ADO.NET provider. There's no DbConnection/DbCommand/DbDataReader surface, no EF Core provider, and no row iterator — callers fill or drain IColumnOf<'T> instances directly. If you want row-at-a-time access or to plug into existing .NET data abstractions, wrap this driver behind your own adapter.
+
+It's ported from
 [ClickHouse/ch-go](https://github.com/ClickHouse/ch-go) (Apache 2.0, copyright
 ClickHouse, Inc. and The Go Faster Authors). Performance > ergonomics. Native
 TCP protocol (revision 54460), zero-copy column decode, LZ4 compression, INSERT
 and SELECT. Build / test / run requires .NET 10 SDK and a reachable ClickHouse
 server (default `localhost:9000`).
 
+ch-go is included as a submodule.
+
 ```bash
-dotnet test Ch.slnx                                 # 200+ tests
+dotnet run --project tests/Ch.Proto.Tests           # 202 Expecto tests
 dotnet run --project src/Ch.Bench.Numbers -- --ping # smoke handshake
 ```
+
+Published as two NuGet packages: **`ClickHouse.FSharp`** (wire protocol +
+columnar codec) and **`ClickHouse.FSharp.Client`** (connection + query
+lifecycle; depends on the first). The F# namespaces are unchanged — you
+still `open Ch.Proto` and `open Ch.Client`.
 
 ---
 
@@ -527,6 +555,7 @@ src/Ch.Proto/                          wire primitives + columns
   Varint.fs / Codes.fs                  LEB128, ClientCode/ServerCode
   CityHash128.fs                        ClickHouse's CH128 hash
   CompressedStream.fs                   LZ4 / None block framing
+  BlockingFdStream.fs                   blocking read(2)/write(2) on the raw fd
   Packets.fs                            ClientHello, ServerHello, Query, …
   Block.fs                              block-body decode
   Int256.fs                             Int256 / UInt256 32-byte structs
@@ -558,6 +587,9 @@ tests/Ch.Proto.Tests/Col*Tests.fs      golden roundtrip + per-column tests
 plans/
   DESIGN_CHOICES.md                     departures from ch-go
   HANDOVER.md                           session-boundary state doc
+  PERF_INVESTIGATION.md                 full perf investigation log
+bench/fs, bench/go                     minimal ch-bench harnesses (A/B)
+scripts/                               bench + A/B measurement runners
 reference/ch-go/                       submodule (read-only)
 ```
 
@@ -566,20 +598,28 @@ reference/ch-go/                       submodule (read-only)
 Decode hot path: one `ReadFull` per column body, byte buffer reused
 across blocks, `MemoryMarshal.Cast<byte, 'T>` for zero-copy reinterpret.
 No virtual dispatch on the bytes-in/bytes-out path — each
-`ColPrimitive<'T>` is JIT-specialised per value type.
+`ColPrimitive<'T>` is JIT-specialised per value type. The `Reader` owns
+its read buffer (no `BufferedStream` layer): header bytes — varints,
+fixed-size ints — are served by index, not a virtual `Stream.Read` per
+byte.
 
-Self-DoS on `localhost:9000` (server + client share the same i7) makes
-the canonical `SELECT 500M number FROM system.numbers_mt` bench
-meaningless as a perf signal — see `RESULTS.md`. Where the bench
-*is* measurable, F# is within ~5 % of ch-go on LZ4-compressed and
-within ~10 % on uncompressed best-time.
+Benchmarked against ch-go on the canonical `SELECT number FROM
+system.numbers_mt LIMIT 500000000` (3.73 GiB of UInt64), both clients
+pinned to the P-cores, 50-run alternating protocol — full method and
+evidence in [`plans/PERF_INVESTIGATION.md`](plans/PERF_INVESTIGATION.md).
+**The F# driver runs ~25–35 ms faster than ch-go's driver. On my machine™.** The
+headline wall time sits ~2 % behind ch-go, but that gap is the bench's
+client-side `sum` scaffolding (not driver code), and the workload is
+server-production-bound — the client is faster than ClickHouse can feed
+it, so neither client's wall time is a pure driver measurement. Best-run
+times effectively tie.
 
 ---
 
 ## Status / coverage
 
 Status of every column family and feature lives in
-`plans/HANDOVER.md`. As of the latest commit: 200+ tests pass, INSERT
+`plans/HANDOVER.md`. As of the latest commit: 202 tests pass, INSERT
 and SELECT both work end-to-end with and without LZ4 compression, and
 ColAuto covers every scalar / parameterised type. Composites
 (Array/Nullable/Map/Tuple/LC) are explicit-type only.

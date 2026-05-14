@@ -3,9 +3,10 @@
   <PropertyGroup>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsPackable>true</IsPackable>
-    <PackageId>Ch.Client</PackageId>
-    <Title>ch-fsharp Client</Title>
-    <Description>F# ClickHouse client over the native TCP protocol (revision 54460). LZ4 compression, columnar SELECT and INSERT, full-duplex query loop with type inference. Ported from ClickHouse/ch-go. Depends on Ch.Proto.</Description>
+    <PackageId>ClickHouse.FSharp.Client</PackageId>
+    <AssemblyName>ClickHouse.FSharp.Client</AssemblyName>
+    <Title>ClickHouse.FSharp.Client</Title>
+    <Description>F# ClickHouse client over the native TCP protocol (revision 54460). LZ4 compression, columnar SELECT and INSERT, full-duplex query loop with type inference. Ported from ClickHouse/ch-go. Depends on ClickHouse.FSharp.</Description>
   </PropertyGroup>
 
   <ItemGroup>

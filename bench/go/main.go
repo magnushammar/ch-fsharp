@@ -67,9 +67,10 @@ func run(ctx context.Context) error {
 	}
 
 	var (
-		data     proto.ColUInt64
-		totalRow int64
-		totalSum uint64
+		data        proto.ColUInt64
+		totalRow    int64
+		totalSum    uint64
+		sumDuration time.Duration
 	)
 	q := ch.Query{
 		Body: fmt.Sprintf("SELECT number FROM system.numbers_mt LIMIT %d", *rows),
@@ -78,12 +79,17 @@ func run(ctx context.Context) error {
 		},
 		OnResult: func(ctx context.Context, block proto.Block) error {
 			// Sum each block so the JIT/compiler can't elide the decode.
+			// Timed separately: the sum is bench scaffolding, not driver
+			// work — `driver = ms - sum` is the apples-to-apples figure
+			// against the F# bench's identically-measured split.
+			t0 := time.Now()
 			s := uint64(0)
 			for _, v := range data {
 				s += v
 			}
 			totalSum += s
 			totalRow += int64(block.Rows)
+			sumDuration += time.Since(t0)
 			return nil
 		},
 	}
@@ -112,8 +118,10 @@ func run(ctx context.Context) error {
 		gib := float64(bytes) / 1073741824.0
 		ms := float64(elapsed.Milliseconds())
 		gbPerSec := gib / (ms / 1000.0)
-		fmt.Fprintf(os.Stderr, "OK: %d rows | %.2f GiB | %.0f ms | %.2f GiB/s | sum=%d\n",
-			totalRow, gib, ms, gbPerSec, totalSum)
+		sumMs := float64(sumDuration.Microseconds()) / 1000.0
+		driverMs := ms - sumMs
+		fmt.Fprintf(os.Stderr, "OK: %d rows | %.2f GiB | %.0f ms | %.2f GiB/s | sum %.0f | driver %.0f\n",
+			totalRow, gib, ms, gbPerSec, sumMs, driverMs)
 	}
 	return nil
 }

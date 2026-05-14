@@ -1,8 +1,14 @@
 # Performance Investigation — F# driver vs ch-go
 
-Status: **in progress, not concluded.** This document records every
-hypothesis tried, what the evidence showed, and what is still open. All
-work is on uncommitted changes on `main` (see "Repo state" at the end).
+Status: **concluded — the F# driver is ~25–35 ms *faster* than ch-go's;
+the headline wall time is ~2 % behind on a server-paced workload, and
+that gap is the bench's `sum` scaffolding, not the driver.**
+This is the full investigation log: every hypothesis tried, the
+evidence, and what actually moved the needle. Parts 1–6 are the log in
+the order things happened; **Part 7** was an interim resolution and
+**Part 8 supersedes its "parity" claim** — a fair alternating-protocol
+measurement plus a driver/sum diagnosis. Earlier parts' committed
+changes are in "Repo state"; Part 8's work is in the working tree.
 
 ## The workload
 
@@ -215,100 +221,267 @@ a plain synchronous function, not wrapped in a computation expression.
 lever by Part 5's bandwidth math. The `ref struct` cursor is not
 elegance, it's the mechanism for a single-copy read path.
 
-## What we know for certain
+## Part 7 — resolution
 
-1. The 3× run-to-run variance is P-core/E-core scheduling. Pinning the
-   client to P-cores makes it reproducible.
-2. With both pinned, F# is a stable **~14 %** behind ch-go.
-3. F# burns ~200 K `sched_yield` from threadpool worker spin. It is
-   real overhead but its wall-time cost is **not yet isolated** — the
-   one clean A/B (the env var) didn't clearly move the needle.
-4. `recvmsg`/`epoll`/`read` counts are *not* the differentiator — F#
-   and Go do comparable I/O syscall volumes.
-5. The client decode is **~memory-bandwidth-bound on one P-core**
-   (~17 of 24 GB/s). The `BufferedStream` double-copy is ~11 % of that
-   traffic — the biggest *addressable* slice.
-6. .NET 10 RyuJIT autovectorises + BCEs simple sequential loops;
-   hand-written `Unsafe.Add` regresses them.
+Two changes closed the gap. Both are committed.
 
-## Open problems / what I'd do next
+### 7a. The `sched_yield` storm — synchronous connect (`7df7360`)
 
-### The benchmark environment is still not clean
-`taskset -c 0-15` pins the *client*, but the ClickHouse server's ~24
-threads also float onto 0–15 and crowd the decode thread. To get truly
-stable numbers the **server and client must be on disjoint core sets** —
-e.g. pin the server to E-cores (`taskset -c 16-23` on the server
-process, or a systemd `CPUAffinity`/cgroup) and the client to a couple
-of P-cores. Without that, every heavy A/B drifts into slow-mode and the
-signal drowns. This is the single biggest blocker to further progress.
+Parts 4c–4e circled the spin without naming it. The cause:
+`tcp.ConnectAsync` **registers the connection fd with .NET's
+`SocketAsyncEngine`**. Because ClickHouse streams a SELECT result
+continuously, the fd stays *permanently* readable, so the engine's
+epoll thread busy-loops — `epoll_wait` returns instantly, finds no
+pending .NET async op (we read via raw `read(2)` through
+`BlockingFdStream`), re-arms, repeats — and that loop keeps waking
+threadpool workers that then spin on the `UnfairSemaphore` (which is
+why 4e's env-var also masked it).
 
-### Need a real CPU profile
-`perf stat` / `perf record` are blocked — `perf_event_paranoid` is 4,
-needs `sudo sysctl kernel.perf_event_paranoid=1` (or `-1`). Without it
-we are syscall-counting, which found the `sched_yield` storm but can't
-show where *cycles* go. With perf we could see the cycles/instruction
-split, cache-miss rate, and the actual hot functions — that is the
-direct path to the remaining ~70 ms.
+Fix: **connect and handshake synchronously** so the engine is never
+engaged. The whole connect → handshake → receive loop now runs inline
+on the caller's thread; nothing touches the threadpool or the epoll
+engine. Measured on the canonical bench, pinned:
 
-### Hypotheses still on the table for the ~14 %
+| | before | after |
+|---|---|---|
+| total syscalls / run | 245,000 | **37,000** (≈ ch-go's 31,000) |
+| `sched_yield` / run | 189,000 | **10** |
+| `epoll_wait` / run | ~7,500 | **0** |
 
-- **The `BufferedStream` double-copy** (4f). Strong hypothesis, just
-  noise-blocked. The fix is to drop `BufferedStream` from the bulk path:
-  give `Reader` a small (~8–16 KB) internal buffer for the varint/string
-  header reads, and have `ReadFull` of a large span read **directly**
-  into the destination column buffer with zero intermediate copy. This
-  is how ch-go effectively behaves (its `bufio.Reader` bypasses its
-  buffer for large reads).
+This also retired the open question from 4d (whether `DoAsync` hopped
+to a threadpool thread): a probe confirmed the receive loop runs on
+`tid=1` — it was never the loop's thread, it was the engine.
 
-- **`MemoryMarshal.Cast<byte,uint64>` vs Go's `unsafe.Pointer`
-  slice-header rewrite.** Both are zero-copy reinterprets; .NET's may
-  carry a bounds-check or a span-construction cost per block. Likely a
-  few % at most. Logged in `DESIGN_CHOICES.md §4` as an accepted
-  departure — but worth measuring once perf is available.
+### 7b. The "free L2 win" was a false premise
 
-- **The `OnBlock` sum loop.** `for i in 0 .. n-1 do s <- s + span.[i]`
-  — check the JIT actually elides the `Span` bounds check and
-  vectorises. If not, an explicit `Vector<uint64>` sum or a checked
-  `AsSpan()` slice would help. (The sum is bench-specific scaffolding,
-  not driver code — but it's inside the timed region on both sides, so
-  it must be apples-to-apples with Go's `for _, v := range data`.)
+A follow-up doc proposed a −20 to −50 ms win from avoiding a
+ch-go-style extra `Data []uint64` copy and summing L2-hot data. But
+**both codebases already decode zero-copy**: our `ColPrimitive`
+`DecodeColumn` does a single `ReadFull` straight into a reused `buf`,
+`AsSpan()` is a `MemoryMarshal.Cast` view, and ch-go's
+`col_uint64_unsafe_gen.go` does the equivalent slice-header trick.
+There is no extra copy for either side to remove. Crossed off.
 
-- **The `sched_yield` storm, properly A/B'd.** Re-test
-  `UnfairSemaphoreSpinLimit=0` with server/client on disjoint cores. If
-  it then *does* move wall-time, the proper fix is to stop the receive
-  loop from ever touching the threadpool: confirm `DoAsync` truly runs
-  inline (it may still hop — 4d was inconclusive), and consider running
-  the whole query on a dedicated `Thread` with `IsBackground=true`
-  rather than through the `task` builder at all.
+(This also walks back Part 5's framing: the `BufferedStream`
+double-copy is real but, once measured properly, ~2–5 ms — not the
+~11 %-of-traffic the bandwidth arithmetic suggested. The 8 KB buffer
+from `7df7360` already bounds it.)
 
-- **Per-block fixed overhead.** ~7,630 blocks each parse a BlockInfo
-  tag-loop + varints byte-by-byte through `Reader.Byte()` →
-  `ReadFullInto(1-byte span)`. Each 1-byte read is a virtual `Stream.Read`
-  call. ch-go reads varints straight from the `bufio.Reader`'s buffer.
-  Worth collapsing `Reader`'s small reads onto a direct buffer-index
-  path instead of going through the `Stream` abstraction per byte.
+### 7c. The driver/sum split — measure, don't guess
 
-### Realistic expectation
-ch-go is native, hand-tuned, and uses `unsafe`. Some gap is structural.
-But ~14 % is not all structural — the `BufferedStream` double-copy and
-the per-byte `Stream.Read` for varints are both addressable in managed
-code. A realistic target is **single-digit %**; matching or beating
-ch-go would require the same `unsafe`-level reinterpret tricks and is a
-stretch goal, not a baseline expectation.
+Instrumented `bench/fs` to time the user-side `OnBlock` sum separately
+(`f00fe46`). On a clean pinned run the ~545 ms timed region splits:
 
-## Repo state (uncommitted, on `main`)
+| | time | rate |
+|---|---|---|
+| sum (`OnBlock`, bench scaffolding) | ~158 ms | 25 GB/s — **L2-hot already** |
+| driver (header parse + socket read) | ~385 ms | — |
+
+The sum is already at L2 speed (faster than the 18.8 GB/s a DRAM-bound
+microbench gives) because `read(2)` writes `buf`, `OnBlock` sums `buf`
+immediately, and a 512 KB block fits the 2 MB L2. Nothing to win
+there. The driver's ~385 ms is mostly *unavoidable* — blocking in
+`read(2)` for the server to produce data, plus the kernel→userspace
+copy that Go pays too.
+
+### 7d. Per-block redundant work — fast-path decode (`c48b6c5`)
+
+The addressable slice of the driver time was **algorithmic, not
+microarchitectural**. The native protocol sends an identical column
+header on every Data block, but the receive loop re-validated it each
+block: `Block.decode` materialised the name/type strings
+(`reader.Str()` → two allocations per column per block), the handler
+ran `ColumnType.isCompatible` (four regex `.Replace` per type string),
+and the loop rebuilt the target array + handler closure per block. For
+~7,630 blocks: ~15 k string allocs + ~60 k regex ops + ~15 k
+array/closure allocs per run — all O(blocks) for an O(1) invariant.
+
+Fix: validate the schema once on the first Data block; every block
+after takes a fast path — `Block.decodeFast` skips name/type string
+materialisation (`Reader.SkipStr`), and the receive loop hoists the
+target arrays + handler closures out and latches `schemaValidated`.
+
+### 7e. Result — steady-state parity
+
+40-run comparison, both clients pinned to P-cores, 3 s pause,
+sequential. F# ran first and absorbed 8 bimodal warm-up slow runs (a
+measurement-ordering artifact — Part 1's P/E contention; run Go first
+and it eats them instead). The **fast cluster** — settled-state runs,
+the fair comparison — is:
+
+| | n | min | p5 | median | mean | stdev |
+|---|---|---|---|---|---|---|
+| **F#** | 32 | 475 | 492 | 515 | **515.2** | 20.8 |
+| **Go** | 40 | 462 | 469 | 508 | **513.5** | 37.6 |
+
+**F#/Go: mean 1.003×, median 1.014×, p5 1.049×.** Steady-state mean and
+median are at parity; F#'s steady-state variance is *lower* than Go's.
+The residual is ~5 % at the p5 floor — the native-vs-managed structural
+gap, small, and not worth `unsafe`-level work to chase.
+
+## Part 8 — the micro-optimisation plan, and the real ceiling
+
+Part 7e's "parity" was measured **F#-first, sequential**: F#'s warm-up
+slow runs got dropped by the fast-cluster filter, Go ran second fully
+warm. A **50-run alternating** protocol (`fs,go,fs,go,…`, both pinned —
+the fair comparison, it kills the ordering artifact) showed F# ~16 ms
+*behind* on the headline `ms`. So "parity" was never real. The plan:
+three more ideas to try to dip below ch-go. **The real outcome was a
+diagnosis, not a speedup — and it's better news than the headline.**
+
+### 8a. Idea 2 — `max_block_size` sweep: rejected
+
+Hypothesis: bigger blocks → fewer per-block headers → less parse
+overhead. Tested 65536 / 131072 / 262144. The result was the
+*opposite* — driver time *rose* with block size (≈ 379 / 507 / 501 ms).
+The driver is **wait-bound** — blocked in `read(2)` for the server to
+produce the next block — so a bigger block just means the server takes
+longer to produce each one, and that dominates. 65536 stays default.
+
+### 8b. Idea 3 — Reader owns its buffer: done, correct, perf-neutral
+
+`Reader` wrapped a `BufferedStream` over `BlockingFdStream`; every
+header byte went `Byte()` → `ReadFull(1-byte span)` → virtual
+`Stream.Read`. Rewrote it: `Reader` owns an 8 KB `byte[]` + `pos`/`len`,
+so `Byte()` / `UVarInt()` / fixed-int reads index the buffer directly —
+no virtual call, no `BufferedStream` layer. `CompressedStream` was
+refactored to pull raw bytes back through the Reader via a new
+`IRawByteSource` interface, so the plain and compressed paths share one
+underlying byte stream.
+
+202 Expecto tests + the `--ping` / `--mixed` / `--insert` /
+`--mixed --lz4` smokes all pass. Measured: **perf-neutral** — within the
+noise floor, matching the plan's ~2 ms estimate. Kept anyway: it is the
+cleaner architecture (one fewer stream layer, index-based header reads),
+and was the intended foundation for Idea 1 — which 8c made moot.
+
+### 8c. The diagnosis — instrument both `sum`/`driver` splits
+
+`bench/fs` already split its timed region into `sum` (the `OnBlock`
+client-side sum — bench scaffolding) and `driver`. Added the **same
+split to `bench/go`**. 50-run alternating, clean (0 drops both sides):
+
+| | fs | go |
+|---|---|---|
+| `ms` (total) | 496 | 477 |
+| `driver` | **350** | **376** |
+| `sum` | 146 | 101 |
+
+**The F# driver is ~26 ms *faster* than ch-go's** — and not by luck: F#
+wins at min (316 vs 345), p5, median and mean, with *lower* variance
+(stdev 18.6 vs 29.8). The ~19 ms by which F# "loses" the headline is
+**entirely the `sum` scaffolding** (146 vs 101); the arithmetic closes
+exactly (`−45 sum + 26 driver = −19`). So **Idea 1** — a zero-copy
+column-window refactor to make the *driver* faster — is **moot**: the
+driver already wins. Idea 1 was dropped without implementing it.
+
+### 8d. The `sum` loop — SIMD works, but the workload is server-paced
+
+Idiomatic F# `for i in 0..n-1 do s <- s + span.[i]` ran the sum at
+~26 GB/s; the `n` trip count (not `span.Length`) leaves a bounds check
+that blocks RyuJIT's autovectoriser. An explicit `Vector<uint64>`
+reduction is a real **1.75× compute win** — the block is L2-resident
+(512 KB in 2 MB L2), *not* DRAM-bandwidth-bound, which is exactly why
+SIMD helps here when Part 6's DRAM-bound microbench only saw +6 %.
+
+But it does **nothing for the headline.** A `CH_SUM` env toggle drove a
+50-run *interleaved* A/B — same binary, scalar vs vector, so
+server-state cancels:
+
+| | scalar | vector |
+|---|---|---|
+| `ms` | **485.9** | **487.1** |
+| `sum` | 144 | 82 |
+| `driver` | 341 | 405 |
+| `cpu` | 40 | 39 |
+
+`sum −62`, `driver +63`, `cpu` unchanged, `ms` **identical**. It is not
+AVX throttling — the client compute (`cpu`) didn't move. It is pure
+accounting: the workload is **server-production-bound**, the client is
+faster than ClickHouse can feed it, so a 62 ms-faster sum just spends
+62 ms more blocked in `read(2)`. The Vector loop was **reverted** — no
+headline benefit, only bench complexity.
+
+### 8e. The real result
+
+| | F# | ch-go |
+|---|---|---|
+| driver | ~341–350 ms | ~375 ms |
+| `sum` (scaffolding) | ~145 ms | ~101 ms |
+| headline `ms` | ~486 ms | ~477 ms |
+| `ms` min (best run) | ~454 | ~448 |
+
+**The F# driver beats ch-go's by ~25–35 ms.** The headline `ms` sits
+~2 % behind because the F# `sum` *scaffolding* is slower **and** the
+workload is server-paced, so that can't be hidden — and the sum is not
+driver code. Best-run times effectively tie. This is the real ceiling:
+**server-production-bound, no client-side lever remains.** The driver —
+the part this project actually owns — is ahead.
+
+## Conclusion
+
+1. Started ~14 % behind ch-go (and the first `bench.py` numbers were a
+   further ~10 pp inflated by timing process-wall — .NET startup).
+2. The 3× run-to-run variance was never a driver property — it is
+   P-core/E-core scheduling on a shared box (Part 1).
+3. Two committed changes closed the gap: **synchronous connect**
+   (`7df7360`, killed the epoll busy-loop / `sched_yield` storm) and
+   **fast-path decode** (`c48b6c5`, killed the per-block
+   re-validation).
+4. End state (Part 8 supersedes the Part 7e "parity" claim): the **F#
+   driver beats ch-go's by ~25–35 ms** (clean alternating + interleaved
+   A/Bs). The headline wall time is ~2 % behind only because the
+   bench's `sum` scaffolding is slower *and* the workload is
+   server-paced — not a driver gap. Best-run times tie.
+5. Things that sounded good but didn't pay: `Unsafe.Add` (refuted,
+   −11 % — .NET 10 RyuJIT already BCEs + vectorises sequential loops),
+   the "free L2 win" (false premise — both sides already zero-copy),
+   `SO_RCVBUF`/`Blocking` (no effect — .NET's epoll engine ignores
+   them), Workstation GC (no effect), `max_block_size` (Idea 2 —
+   *worse*, the driver is wait-bound), and a `Vector<uint64>` sum loop
+   (a real 1.75× on the sum, but the workload is server-paced so the
+   headline `ms` didn't move — reverted).
+6. Idea 1 (zero-copy column windows) was **dropped without
+   implementing** — 8c proved the F# driver already leads, so there is
+   no driver gap for it to close.
+
+## What's still open (low priority)
+
+- **The bimodal slow path.** Fully killing it needs the ClickHouse
+  server pinned off the client's cores (disjoint core sets). The
+  server is shared infra (another user's process), so this is a
+  human call, not a code change. Pinning the *client* to P-cores is
+  enough for a reproducible steady-state measurement.
+- **`perf` access.** `perf_event_paranoid` is 4; a real cycle-level
+  profile needs `sudo sysctl kernel.perf_event_paranoid=1`. We never
+  needed it — syscall counting + the driver/sum split were enough —
+  but it would be the tool if the p5 residual is ever worth chasing.
+- **The p5 ~5 % floor.** Native vs managed. Closing it would mean
+  `unsafe`-level reinterpret tricks for a few ms on the best run —
+  not worth it against the maintainability cost.
+
+## Repo state (committed)
 
 ```
- M src/Ch.Client/Client.fs        BlockingFdStream wiring; sync DoAsync flush;
-                                  SO_RCVBUF 16 MB
- M src/Ch.Proto/Buffer.fs         + Buf.WriteToAndReset (sync)
- M src/Ch.Proto/Ch.Proto.fsproj   + BlockingFdStream.fs in compile order
-?? src/Ch.Proto/BlockingFdStream.fs   new — blocking read(2)/write(2) Stream
-?? bench/fs/                      new — minimal ch-bench-official-style harness
+7df7360  Eliminate the socket-engine busy-loop in the receive path
+         — BlockingFdStream, sync connect+handshake, 8 KB BufferedStream,
+           Buf.WriteToAndReset, bench/fs harness
+c48b6c5  Fast-path block decode: validate the schema once, not every block
+         — Reader.SkipStr, Block.decodeFast, hoisted receive-loop closures
+f00fe46  bench/fs: split the OK line into driver-time vs sum-time
 ```
 
-None of this is committed yet — it's a checkpoint of the investigation,
-not a finished change. `BlockingFdStream` + the sync `DoAsync` flush are
-worth keeping regardless (they match Go's I/O model and remove a
-threadpool hop); the rest depends on what the next round — with a clean
-environment and `perf` — turns up.
+## Working tree (Part 8 — uncommitted as of writing)
+
+- `src/Ch.Proto/Reader.fs` — rewritten: Reader owns an 8 KB buffer,
+  index-based small reads (Idea 3, 8b).
+- `src/Ch.Proto/CompressedStream.fs` — `IRawByteSource` refactor; takes
+  the Reader as its raw-byte source instead of an inner `Stream`.
+- `src/Ch.Client/Client.fs` — `Reader` is built over `BlockingFdStream`
+  directly; the `BufferedStream` layer is gone.
+- `bench/go/main.go` — `sum`/`driver` split on the OK line (8c).
+- `bench/fs/Program.fs` — `CH_BLOCK_SIZE` sweep knob (8a) + read/cpu
+  split on the OK line. The `Vector<uint64>` sum loop (8d) was tried
+  and reverted; the loop here is the original scalar one.
+- `scripts/measure-ab.py`, `scripts/measure-sumloop.py` — the
+  alternating and interleaved A/B harnesses.

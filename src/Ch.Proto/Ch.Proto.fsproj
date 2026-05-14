@@ -3,9 +3,10 @@
   <PropertyGroup>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsPackable>true</IsPackable>
-    <PackageId>Ch.Proto</PackageId>
-    <Title>ch-fsharp Proto</Title>
-    <Description>ClickHouse native-protocol wire primitives and columnar codec for F#. Ported from ClickHouse/ch-go. Includes 20+ column types (primitives, Decimal, Enum, Date/DateTime, IPv4/IPv6, UUID, Array, Nullable, Map, Tuple, LowCardinality, JSON, BFloat16, Point, Interval, Int256), LZ4 framing, and CityHash128. Use Ch.Client for connection lifecycle.</Description>
+    <PackageId>ClickHouse.FSharp</PackageId>
+    <AssemblyName>ClickHouse.FSharp</AssemblyName>
+    <Title>ClickHouse.FSharp</Title>
+    <Description>ClickHouse native-protocol wire primitives and columnar codec for F#. Ported from ClickHouse/ch-go. Includes 20+ column types (primitives, Decimal, Enum, Date/DateTime, IPv4/IPv6, UUID, Array, Nullable, Map, Tuple, LowCardinality, JSON, BFloat16, Point, Interval, Int256), LZ4 framing, and CityHash128. Use ClickHouse.FSharp.Client for connection lifecycle.</Description>
   </PropertyGroup>
 
   <ItemGroup>

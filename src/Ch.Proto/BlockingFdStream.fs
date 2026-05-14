@@ -51,6 +51,16 @@ type BlockingFdStream(fd: int) =
         if flags <> -1 then
             fcntl (fd, F_SETFL, flags &&& ~~~O_NONBLOCK) |> ignore
 
+    // DIAGNOSTIC: process-global accumulators for time spent inside the
+    // read(2) syscall (wait-for-data + kernel→userspace copy) and the call
+    // count. Lets a bench split driver-time into read(2) vs client CPU.
+    // Reset with ResetReadStats before the timed region.
+    static let mutable readTicks : int64 = 0L
+    static let mutable readCount : int64 = 0L
+    static member ReadTicks = readTicks
+    static member ReadCount = readCount
+    static member ResetReadStats() = readTicks <- 0L; readCount <- 0L
+
     member _.Fd = fd
 
     override _.CanRead = true
@@ -69,9 +79,12 @@ type BlockingFdStream(fd: int) =
         else
             use p = fixed buffer
             let addr = NativePtr.toNativeInt p
+            let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
             let mutable n = read (fd, addr, unativeint buffer.Length)
             while n < 0n && Marshal.GetLastPInvokeError() = EINTR do
                 n <- read (fd, addr, unativeint buffer.Length)
+            readTicks <- readTicks + (System.Diagnostics.Stopwatch.GetTimestamp() - t0)
+            readCount <- readCount + 1L
             if n < 0n then
                 raise (IOException $"read(2) failed: errno {Marshal.GetLastPInvokeError()}")
             int n

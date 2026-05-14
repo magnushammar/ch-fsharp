@@ -5,7 +5,17 @@ open System.Buffers.Binary
 open System.IO
 open K4os.Compression.LZ4
 
-/// Decompressing wrapper around another Stream.
+/// Raw-byte source a `CompressedStream` reads its frames from. `Reader`
+/// implements this over its own buffer + socket, so the plain and
+/// compressed paths draw from the same underlying byte stream (the Reader
+/// may have buffered ahead past a temp-table name into the first
+/// compressed frame — `ReadRawFull` drains that buffer first, then the
+/// socket).
+type IRawByteSource =
+    /// Read exactly `span.Length` raw bytes. Throws on EOF.
+    abstract ReadRawFull : Span<byte> -> unit
+
+/// Decompressing wrapper around an `IRawByteSource`.
 /// Mirrors `compress.Reader` in ch-go (`compress/reader.go`).
 ///
 /// Wire frame per block:
@@ -20,7 +30,7 @@ open K4os.Compression.LZ4
 ///   0x90 — ZSTD (NotSupported in MVP)
 ///   0x02 — None (payload is the uncompressed data, still checksummed)
 [<Sealed>]
-type CompressedStream(inner: Stream) =
+type CompressedStream(src: IRawByteSource) =
     inherit Stream()
 
     // Limits mirror ch-go's `compress.maxDataSize` / `maxBlockSize` (128 MB).
@@ -36,19 +46,8 @@ type CompressedStream(inner: Stream) =
     let mutable dataLen = 0
     let mutable dataPos = 0
 
-    let readFull (buf: Span<byte>) =
-        let mutable remaining = buf.Length
-        let mutable offset = 0
-        while remaining > 0 do
-            let n = inner.Read(buf.Slice(offset, remaining))
-            if n <= 0 then
-                raise (EndOfStreamException
-                    $"EOF in compressed block: needed {buf.Length}, got {offset}")
-            offset <- offset + n
-            remaining <- remaining - n
-
     let readBlock () =
-        readFull (header.AsSpan())
+        src.ReadRawFull(header.AsSpan())
 
         let rawSize = int (BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(header, 17, 4)))
         let dataSize = int (BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(header, 21, 4)))
@@ -65,7 +64,7 @@ type CompressedStream(inner: Stream) =
             raw <- Array.zeroCreate (max needed (raw.Length * 2))
         Array.blit header 0 raw 0 HeaderSize
         if payloadSize > 0 then
-            readFull (raw.AsSpan(HeaderSize, payloadSize))
+            src.ReadRawFull(raw.AsSpan(HeaderSize, payloadSize))
 
         // Verify CityHash128 over [method..end] = `rawSize` bytes.
         let expectedLow = BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(raw, 0, 8))
@@ -105,8 +104,6 @@ type CompressedStream(inner: Stream) =
             raise (NotSupportedException "ZSTD decompression not implemented in MVP")
         | other ->
             raise (InvalidDataException $"unknown compression method 0x{other:x2}")
-
-    member _.Inner = inner
 
     override _.Read(buffer: Span<byte>) : int =
         if dataPos >= dataLen then

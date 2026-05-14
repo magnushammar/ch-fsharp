@@ -18,6 +18,13 @@ let main _ =
     let password =
         match Environment.GetEnvironmentVariable "CLICKHOUSE_PASSWORD" with
         | null -> "" | s -> s
+    // max_block_size is swept during perf testing — CH_BLOCK_SIZE overrides
+    // the 65536 default. Bigger blocks = fewer per-block headers, but the
+    // column buffer must stay <= the 2 MB L2 or the sum goes DRAM-bound.
+    let blockSize =
+        match Environment.GetEnvironmentVariable "CH_BLOCK_SIZE" with
+        | null | "" -> 65536
+        | s -> int s
 
     let opts =
         { ChOptions.defaults with
@@ -52,8 +59,12 @@ let main _ =
             Body     = sprintf "SELECT number FROM system.numbers_mt LIMIT %d" rows
             Results  = [ { Name = "number"; Column = col } ]
             OnBlock  = onBlock
-            Settings = [ { Key = "max_block_size"; Value = "65536"; Important = true } ] }
+            Settings = [ { Key = "max_block_size"; Value = string blockSize; Important = true } ] }
 
+    // DIAGNOSTIC: reset the read(2) accumulator after connect so it measures
+    // only the timed query — splits driver-time into read(2) (wait + kernel
+    // copy) vs client CPU.
+    BlockingFdStream.ResetReadStats()
     let sw = Stopwatch.StartNew()
     client.DoAsync(q, cts.Token).GetAwaiter().GetResult()
     sw.Stop()
@@ -71,6 +82,8 @@ let main _ =
         let ms    = sw.Elapsed.TotalMilliseconds
         let gbps  = gib / (ms / 1000.0)
         let sumMs = float sumTicks / float Stopwatch.Frequency * 1000.0
-        eprintfn "OK: %d rows | %.2f GiB | %.0f ms | %.2f GiB/s | sum %.0f ms | driver %.0f ms"
-            totalRows gib ms gbps sumMs (ms - sumMs)
+        let driverMs = ms - sumMs
+        let readMs = float BlockingFdStream.ReadTicks / float Stopwatch.Frequency * 1000.0
+        eprintfn "OK: %d rows | %.2f GiB | %.0f ms | %.2f GiB/s | sum %.0f | driver %.0f (read %.0f / %d calls, cpu %.0f)"
+            totalRows gib ms gbps sumMs driverMs readMs BlockingFdStream.ReadCount (driverMs - readMs)
         0
