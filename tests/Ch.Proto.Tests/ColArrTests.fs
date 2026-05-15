@@ -121,13 +121,13 @@ let tests = testList "ColArr" [
         Expect.equal row1.[0] 4 "row 1 [0]"
         Expect.equal row1.[1] 5 "row 1 [1]"
 
-    testCase "RowSpan falls back to allocation for non-primitive inner" <| fun _ ->
-        // ColStr is not IBulkReadable<string>; RowSpan should still work
-        // by materialising Row(i) and returning a span over the result.
+    testCase "RowSpan throws for non-bulk-readable inner" <| fun _ ->
+        // ColStr is not IBulkReadable<string>. To keep the perf escape
+        // hatch honest, RowSpan throws instead of silently allocating —
+        // callers who want a heap 'T[] use Row(i) instead.
         let col = ColArr<string>(ColStr())
         col.Append([| "a"; "bb"; "ccc" |])
-        let row = col.RowSpan(0)
-        Expect.equal row.Length 3 "fallback row length"
-        Expect.equal row.[0] "a" "fallback [0]"
-        Expect.equal row.[2] "ccc" "fallback [2]"
+        Expect.throwsT<NotSupportedException>
+            (fun () -> col.RowSpan(0).Length |> ignore)
+            "non-bulk inner"
 ]

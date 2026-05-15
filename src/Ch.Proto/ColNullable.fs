@@ -29,8 +29,11 @@ type ColNullable<'T>(inner: IColumnOf<'T>) =
     /// Number of null-mask bytes currently held (one per row).
     member _.NullsCount = nullsCount
     /// Zero-copy view of the null-mask bytes (0 = not-null, 1 = null).
+    /// Method (not property) for surface symmetry with `ValueSpan()`,
+    /// which has to be a method because of the F# byref/raise IL
+    /// limitation. Both span accessors share the same call shape.
     /// Lifetime: valid only until the next `Append` / `DecodeColumn` / `Reset`.
-    member _.NullsSpan : ReadOnlySpan<byte> =
+    member _.NullsSpan() : ReadOnlySpan<byte> =
         ReadOnlySpan(nulls, 0, nullsCount)
     /// Direct access to the values column. Reading at a null index returns
     /// the inner column's filler — usually 0 / "" — not meaningful.

@@ -81,7 +81,7 @@ let tests = testList "ColNullable" [
         col.Append(ValueNone)
         col.Append(ValueSome 100)
         let values = col.ValueSpan()
-        let nulls = col.NullsSpan
+        let nulls = col.NullsSpan()
         Expect.equal values.Length 3 "values length"
         Expect.equal nulls.Length 3 "nulls length"
         Expect.equal values.[0] 42 "row 0 value"

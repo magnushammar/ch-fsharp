@@ -55,22 +55,24 @@ type ColArr<'T>(inner: IColumnOf<'T>) =
             result.[j] <- inner.Row(startIdx + j)
         result
 
-    /// Zero-copy view of row i when `inner` is a bulk-readable primitive
-    /// (`ColPrimitive<'T>`) — returns a slice into the inner column's typed
-    /// buffer. For non-primitive inner (`ColStr`, `ColEnum*`, etc.) it
-    /// falls back to allocating `Row(i)` and returning a span over the
-    /// result — still correct, just no longer zero-alloc.
+    /// Zero-copy view of row i — supported when `inner` is bulk-readable
+    /// (`ColPrimitive<'T>`). Returns a slice into the inner column's typed
+    /// buffer. For non-bulk inner (`ColStr`, `ColEnum*`, etc.) raises
+    /// `NotSupportedException`; the friendlier "silently allocate" path
+    /// was rejected because it turns a perf escape hatch into a silent
+    /// regression. Use `Row(i)` if you want a guaranteed `'T[]`.
     /// Lifetime: aliases inner's buffer, valid only until the next
     /// `DecodeColumn` / `Reset` / `Append` on the inner column.
-    member this.RowSpan(i: int) : ReadOnlySpan<'T> =
+    member _.RowSpan(i: int) : ReadOnlySpan<'T> =
+        let bulk : IBulkReadable<'T> =
+            match box inner with
+            | :? IBulkReadable<'T> as b -> b
+            | _ ->
+                raise (NotSupportedException
+                    $"ColArr.RowSpan requires bulk-readable inner (ColPrimitive<'T>); got {inner.GetType().Name}. Use Row(i) for a heap 'T[].")
         let endIdx = int offsets.[i]
         let startIdx = if i = 0 then 0 else int offsets.[i - 1]
-        let length = endIdx - startIdx
-        match box inner with
-        | :? IBulkReadable<'T> as bulk ->
-            bulk.AsSpan().Slice(startIdx, length)
-        | _ ->
-            ReadOnlySpan<'T>(this.Row(i))
+        bulk.AsSpan().Slice(startIdx, endIdx - startIdx)
 
     /// Append a row of values from an array. Delegates to `AppendSpan` so
     /// the bulk-copy dispatch is shared.
