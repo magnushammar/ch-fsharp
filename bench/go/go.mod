@@ -1,4 +1,4 @@
-module github.com/latinum/ch-go-fsharp/bench/go
+module github.com/magnushammar/ch-fsharp/bench/go
 
 go 1.25.0
 
