@@ -80,8 +80,11 @@ type ColEnum8() =
         nameToValue.Clear()
         valueToName.Clear()
         let inner = t.Substring(openParen + 1, lastParen - openParen - 1)
-        for def in inner.Split(',') do
-            let eq = def.IndexOf('=')
+        // Quote-aware split / lookup — `Enum8('a,b' = 1)` (quoted comma
+        // in the name) and `Enum8('a=b' = 1)` (quoted `=`) both parse
+        // correctly via `CompositeTypeString`.
+        for def in CompositeTypeString.splitTopLevel ',' inner do
+            let eq = CompositeTypeString.findTopLevel '=' def
             if eq < 0 then raise (FormatException $"bad enum def: '{def}'")
             let name = def.Substring(0, eq).Trim().Trim('\'')
             let value = System.SByte.Parse(def.Substring(eq + 1).Trim())
@@ -175,8 +178,11 @@ type ColEnum16() =
         nameToValue.Clear()
         valueToName.Clear()
         let inner = t.Substring(openParen + 1, lastParen - openParen - 1)
-        for def in inner.Split(',') do
-            let eq = def.IndexOf('=')
+        // Quote-aware split / lookup — `Enum8('a,b' = 1)` (quoted comma
+        // in the name) and `Enum8('a=b' = 1)` (quoted `=`) both parse
+        // correctly via `CompositeTypeString`.
+        for def in CompositeTypeString.splitTopLevel ',' inner do
+            let eq = CompositeTypeString.findTopLevel '=' def
             if eq < 0 then raise (FormatException $"bad enum def: '{def}'")
             let name = def.Substring(0, eq).Trim().Trim('\'')
             let value = System.Int16.Parse(def.Substring(eq + 1).Trim())

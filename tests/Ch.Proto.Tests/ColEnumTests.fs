@@ -97,4 +97,32 @@ let tests = testList "ColEnum" [
         Expect.equal (ColumnType.normalize "Array(Enum8('a' = 1))") "Array(Enum8)" "array of enum"
         Expect.isTrue (ColumnType.isCompatible "Enum8" "Enum8('a' = 1, 'b' = 2)") "enum8 compat"
         Expect.isTrue (ColumnType.isCompatible "Enum16" "Enum16('foo' = 0)") "enum16 compat"
+
+    testCase "ColEnum8.Infer handles commas inside quoted names" <| fun _ ->
+        let col = ColEnum8()
+        col.Infer("Enum8('a,b' = 1, 'c' = 2)")
+        Expect.equal col.NameToValue.["a,b"] 1y "quoted-comma name"
+        Expect.equal col.NameToValue.["c"] 2y "plain name"
+        Expect.equal col.ValueToName.[1y] "a,b" "reverse map"
+
+    testCase "ColEnum8.Infer handles = inside quoted names" <| fun _ ->
+        let col = ColEnum8()
+        col.Infer("Enum8('a=b' = 1, 'normal' = 2)")
+        Expect.equal col.NameToValue.["a=b"] 1y "quoted-= name"
+        Expect.equal col.NameToValue.["normal"] 2y "plain name"
+
+    testCase "ColEnum16.Infer handles commas inside quoted names" <| fun _ ->
+        let col = ColEnum16()
+        col.Infer("Enum16('x,y' = 100, 'z' = 200)")
+        Expect.equal col.NameToValue.["x,y"] 100s "quoted-comma name"
+        Expect.equal col.NameToValue.["z"] 200s "plain name"
+
+    testCase "ColAuto.build now handles Enum8 with quoted commas in names" <| fun _ ->
+        // The full chain: ColAuto.build → Enum8 branch → asInfer → Infer.
+        // Both the outer splitOnTopLevelCommas (in ColAuto) and the
+        // inner splitTopLevel (in ColEnum.Infer) must be quote-aware.
+        let col = ColAuto.build "Enum8('a,b' = 1, 'c,d' = 2)"
+        let en = col :?> ColEnum8
+        Expect.equal en.NameToValue.["a,b"] 1y "first quoted-comma"
+        Expect.equal en.NameToValue.["c,d"] 2y "second quoted-comma"
 ]

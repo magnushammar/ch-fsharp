@@ -47,6 +47,66 @@ module ColumnType =
     let isCompatible (clientType: string) (serverType: string) : bool =
         normalize clientType = normalize serverType
 
+/// Shared parsing helpers for ClickHouse type strings.
+///
+/// ClickHouse type strings nest parens (`Array(Nullable(Int32))`) and
+/// embed single-quoted strings (`Enum8('foo' = 1)`, `DateTime('UTC')`).
+/// Naive `String.Split(',')` and `IndexOf('=')` lookups mis-handle
+/// quoted regions: e.g. `Enum8('a,b' = 1, 'c' = 2)` has a quoted comma
+/// inside the first name, and `Enum8('a=b' = 1)` has a quoted `=`.
+///
+/// Both `ColAuto.build` (Tuple / Map outer splits) and `ColEnum.Infer`
+/// (name / value def lookups) need quote-and-depth-aware scanning;
+/// these helpers centralise that logic.
+module CompositeTypeString =
+    /// Split `s` at occurrences of `sep` that are simultaneously at
+    /// paren-depth 0 and outside any single-quoted region. Returns the
+    /// segments in order, including a final segment after the last
+    /// separator (empty string if `s` ends with `sep`).
+    let splitTopLevel (sep: char) (s: string) : string list =
+        let acc = System.Collections.Generic.List<string>()
+        let mutable startIdx = 0
+        let mutable depth = 0
+        let mutable inQuote = false
+        for i in 0 .. s.Length - 1 do
+            let c = s.[i]
+            if inQuote then
+                if c = '\'' then inQuote <- false
+            else
+                match c with
+                | '\'' -> inQuote <- true
+                | '(' -> depth <- depth + 1
+                | ')' -> depth <- depth - 1
+                | ch when ch = sep && depth = 0 ->
+                    acc.Add(s.Substring(startIdx, i - startIdx))
+                    startIdx <- i + 1
+                | _ -> ()
+        acc.Add(s.Substring(startIdx))
+        List.ofSeq acc
+
+    /// Index of the first occurrence of `target` at paren-depth 0 and
+    /// outside any single-quoted region. Returns -1 if none. Used by
+    /// `ColEnum.Infer` to find the `=` between an enum name and its
+    /// integer value, ignoring `=` characters embedded in the name.
+    let findTopLevel (target: char) (s: string) : int =
+        let mutable depth = 0
+        let mutable inQuote = false
+        let mutable found = -1
+        let mutable i = 0
+        while i < s.Length && found < 0 do
+            let c = s.[i]
+            if inQuote then
+                if c = '\'' then inQuote <- false
+            else
+                match c with
+                | '\'' -> inQuote <- true
+                | '(' -> depth <- depth + 1
+                | ')' -> depth <- depth - 1
+                | ch when ch = target && depth = 0 -> found <- i
+                | _ -> ()
+            i <- i + 1
+        found
+
 /// Polymorphic interface every column must satisfy. Mirrors ch-go's
 /// `Column = ColResult + ColInput` combined interface (`proto/column.go`):
 /// every concrete column type in this codebase has both encode and decode

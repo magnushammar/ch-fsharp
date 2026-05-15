@@ -82,41 +82,17 @@ type ColAuto() =
         let peelOuter (prefix: string) (s: string) =
             s.Substring(prefix.Length + 1, s.Length - prefix.Length - 2)
 
-        // Split a composite body on top-level commas, ignoring commas
-        // inside nested parens AND inside single-quoted strings. The
-        // latter matters for `Enum8('a,b' = 1, 'c' = 2)` and similar —
-        // ClickHouse enum value names can contain `,` `(` `)`. Quote
-        // toggling on `'`; escape sequences inside quotes are out of
-        // scope (no real type string we've seen uses them).
-        let splitOnTopLevelCommas (body: string) : string list =
-            let acc = ResizeArray<string>()
-            let mutable startIdx = 0
-            let mutable depth = 0
-            let mutable inQuote = false
-            for i in 0 .. body.Length - 1 do
-                let c = body.[i]
-                if inQuote then
-                    if c = '\'' then inQuote <- false
-                else
-                    match c with
-                    | '\'' -> inQuote <- true
-                    | '(' -> depth <- depth + 1
-                    | ')' -> depth <- depth - 1
-                    | ',' when depth = 0 ->
-                        acc.Add(body.Substring(startIdx, i - startIdx).Trim())
-                        startIdx <- i + 1
-                    | _ -> ()
-            acc.Add(body.Substring(startIdx).Trim())
-            List.ofSeq acc
+        // Both parsers go through the shared splitter in
+        // `CompositeTypeString` so quote/paren handling stays
+        // consistent with `ColEnum.Infer`.
 
-        // Split "Tuple(T1, T2, Tuple(T3, T4), ...)" on top-level commas.
         let parseTupleInners (s: string) : string list =
-            splitOnTopLevelCommas (s.Substring(6, s.Length - 7))
+            CompositeTypeString.splitTopLevel ',' (s.Substring(6, s.Length - 7))
+            |> List.map (fun seg -> seg.Trim())
 
-        // Split "Map(K, V)" — expect exactly two top-level segments.
         let parseMapInners (s: string) : string * string =
-            match splitOnTopLevelCommas (s.Substring(4, s.Length - 5)) with
-            | [k; v] -> k, v
+            match CompositeTypeString.splitTopLevel ',' (s.Substring(4, s.Length - 5)) with
+            | [k; v] -> k.Trim(), v.Trim()
             | parts ->
                 raise (NotSupportedException
                     $"ColAuto: malformed Map type '{s}' — expected exactly 2 top-level segments, got {parts.Length}")
