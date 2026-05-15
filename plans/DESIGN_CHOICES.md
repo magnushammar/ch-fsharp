@@ -85,6 +85,29 @@ but not yet started; they will wrap the low-level API.
     (the name-API) and `AppendRaw(int8)` / `RawValue(i): int8` (the wire
     API). Saves one indirection without losing functionality.
 
+12. **The client API is synchronous — `Connect` / `Ping` / `Select` /
+    `Insert` return plain values, not `Task`.** ch-go's API is sync-shaped
+    too (Go has no async/await; goroutines provide concurrency). An earlier
+    iteration here returned `Task` from `ConnectAsync` / `DoAsync` /
+    `PingAsync`, but the driver is deliberately synchronous under the hood —
+    `BlockingFdStream` does raw blocking `read(2)`/`write(2)` to keep the
+    receive loop off the threadpool (a threadpool worker blocked in
+    `read(2)` triggers thread-injection + `sched_yield` spin). The `Task`
+    surface was a fiction every caller unwrapped with
+    `.GetAwaiter().GetResult()`; it's gone. `CancellationToken` stays on the
+    signatures — reserved for future between-block cancellation, accepted
+    but not yet honoured.
+
+13. **SELECT and INSERT are separate methods over separate record types,
+    not one mode-inferred `ChQuery`.** ch-go's `ch.Query` is a single struct
+    whose `Result` vs `Input` fields decide the mode at runtime. We split it
+    into `SelectQuery` (`Results` + `OnBlock`) and `InsertQuery` (`Input` +
+    `OnInput`), dispatched by `client.Select` / `client.Insert` — populating
+    the wrong field set is now a compile error rather than a silent runtime
+    surprise. Both still funnel into one shared private receive loop; only
+    the caller-facing surface is split. DDL is a `SelectQuery` with an empty
+    `Results`.
+
 ### INSERT path
 
 12. **INSERT uses a single-threaded send → wait-for-header →

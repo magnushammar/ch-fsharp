@@ -35,7 +35,7 @@ let main _ =
             ClientName = "ch-fsharp.bench-numbers" }
 
     use cts = new System.Threading.CancellationTokenSource()
-    use client = Client.ConnectAsync(opts, cts.Token).GetAwaiter().GetResult()
+    use client = Client.Connect(opts, cts.Token)
 
     let col = ColUInt64()
     let mutable totalSum  = 0UL
@@ -55,7 +55,7 @@ let main _ =
         sumTicks  <- sumTicks + (Stopwatch.GetTimestamp() - t0)
 
     let q =
-        { ChQuery.defaults with
+        { SelectQuery.defaults with
             Body     = sprintf "SELECT number FROM system.numbers_mt LIMIT %d" rows
             Results  = [ { Name = "number"; Column = col } ]
             OnBlock  = onBlock
@@ -66,7 +66,7 @@ let main _ =
     // copy) vs client CPU.
     BlockingFdStream.ResetReadStats()
     let sw = Stopwatch.StartNew()
-    client.DoAsync(q, cts.Token).GetAwaiter().GetResult()
+    client.Select(q, cts.Token)
     sw.Stop()
 
     let expSum =

@@ -5,8 +5,6 @@ open System.Buffers
 open System.Buffers.Binary
 open System.IO
 open System.Text
-open System.Threading
-open System.Threading.Tasks
 
 /// Encode-side buffer. Wraps an ArrayBufferWriter<byte> so growth is amortized
 /// and `WrittenMemory` can be handed straight to `Stream.WriteAsync`.
@@ -83,21 +81,6 @@ type Buf(initialCapacity: int) =
 
     /// Encode a ClientCode (single byte).
     member this.PutClientCode(c: ClientCode) = this.PutByte(byte c)
-
-    /// Send the contents to a Stream and reset the buffer.
-    member this.WriteToAndResetAsync(stream: Stream, ct: CancellationToken) : ValueTask =
-        let memory = writer.WrittenMemory
-        let vt = stream.WriteAsync(memory, ct)
-        if vt.IsCompletedSuccessfully then
-            this.Reset()
-            ValueTask.CompletedTask
-        else
-            let t =
-                task {
-                    do! vt
-                    this.Reset()
-                }
-            ValueTask(t)
 
     /// Synchronous send + reset. Used by the query path so the receive loop
     /// runs inline on the caller's thread instead of being resumed on a

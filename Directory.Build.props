@@ -35,9 +35,8 @@
   <!-- Shared NuGet package metadata. Per-project files only need to set
        PackageId, Description, and IsPackable. -->
   <PropertyGroup>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Authors>Magnus Hammar</Authors>
-    <Company>Latinum</Company>
     <Copyright>Copyright 2026 Magnus Hammar</Copyright>
     <RepositoryUrl>https://github.com/magnushammar/ch-fsharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

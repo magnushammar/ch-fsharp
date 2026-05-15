@@ -18,25 +18,23 @@ improve them (and log departures in DESIGN_CHOICES.md when we do).
 
 ## Where we are
 
-73 commits in. Recent run added:
+The column suite covers ch-go's supported set bidirectionally; INSERT and
+SELECT both work end-to-end with and without LZ4. `git log --oneline` has
+the commit-level detail.
 
-```
-7ccf0fe  Add CompressedFrame.wrapLZ4; use for INSERT data blocks under compression
-ce87726  Extend --mixed bench to BFloat16 column
-a47a3f9  Add ColBFloat16: UInt16 wire + float32 convenience helpers
-459a767  Add Int256 / UInt256 / Decimal256 via a custom 32-byte struct
-82d9ab7  Refresh HANDOVER: INSERT done; next milestones are Int256, LC(FixedString), ColAuto
-c5bd507  Add INSERT support: ChQuery.Input + EncodeDataBlock + send/recv flow
-… (Point/Nothing/Interval/JSON/Enum/Decimal/Tuple/Map earlier)
-```
+**Tier 1 (API-surface fixes) shipped — v0.3.0.** The client API is now
+honestly synchronous: `Client.Connect` / `.Ping` / `.Select` / `.Insert`
+return plain values, no `Task` wrappers. SELECT vs INSERT is type-safe —
+`SelectQuery` and `InsertQuery` are separate records dispatched by
+separate methods, replacing the old mode-inferred `ChQuery`
+(`DESIGN_CHOICES.md` items 12–13).
 
-**201/201 tests pass.** Live multi-type SELECT works end-to-end via
-`/tmp/ch-bench-fs/Ch.Bench.Numbers --mixed` against `localhost:9000`,
-exercising 13 result columns through Map, Tuple, Decimal, Enum8, Point,
-IntervalDay, JSON, and BFloat16. `--insert` round-trips four rows
-through a Memory-engine table both with and without LZ4 compression.
-`ColAuto` resolves any scalar / parameterised column type from a
-server-sent type string for ad-hoc receive scenarios.
+All Expecto tests pass. Live smokes against `localhost:9000` —
+`Ch.Bench.Numbers --ping / --mixed / --insert / --rows 100` — all green:
+`--mixed` exercises 13 result columns through Map, Tuple, Decimal, Enum8,
+Point, IntervalDay, JSON, BFloat16; `--insert` round-trips four rows
+through a Memory-engine table. `ColAuto` resolves any scalar /
+parameterised type from a server-sent type string for ad-hoc receive.
 
 ## Repo map
 
@@ -72,7 +70,7 @@ src/Ch.Proto/                            wire primitives + columns
   Int256.fs                               Int256 / UInt256 32-byte structs
 src/Ch.Client/                           connection lifecycle
   Options.fs                              ChOptions record
-  Client.fs                               Connect/Ping/Do, state dispatch
+  Client.fs                               Connect/Ping/Select/Insert, state dispatch
 src/Ch.Bench.Numbers/Program.fs          bench harness + --mixed smoke
 tests/Ch.Proto.Tests/Col*Tests.fs        per-column tests with golden roundtrip
 plans/
@@ -198,7 +196,7 @@ dotnet publish src/Ch.Bench.Numbers -c Release -o /tmp/ch-bench-fs
 /tmp/ch-bench-fs/Ch.Bench.Numbers --ping    # handshake only
 ```
 
-Run all tests: `dotnet test Ch.slnx`.
+Run all tests: `dotnet run --project tests/Ch.Proto.Tests`.
 
 Manual server queries: `clickhouse-client --password "$CLICKHOUSE_PASSWORD"
 -q "..."`. Useful for inspecting golden bytes, profile events, etc.
@@ -260,7 +258,7 @@ LZ4-compressed, within ~10% on uncompressed best-time).
 1. Read this file.
 2. Skim `plans/DESIGN_CHOICES.md`.
 3. `git log --oneline -10` and `git status`.
-4. `dotnet test Ch.slnx` (should be 82/82).
+4. `dotnet run --project tests/Ch.Proto.Tests` (all tests should pass).
 5. `/tmp/ch-bench-fs/Ch.Bench.Numbers --mixed` (should print 6 rows of
    mixed-type data; if /tmp is gone, republish first).
 6. Pick the next milestone from the list above. M-Map is the smallest.

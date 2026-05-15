@@ -58,9 +58,9 @@ let opts =
         Compression = false }   // set true to negotiate LZ4
 
 use cts = new System.Threading.CancellationTokenSource()
-use client = Client.ConnectAsync(opts, cts.Token).GetAwaiter().GetResult()
+use client = Client.Connect(opts, cts.Token)
 
-client.PingAsync(cts.Token).GetAwaiter().GetResult()
+client.Ping(cts.Token)
 ```
 
 `Client` wraps one TCP connection. It is **not thread-safe** — use one
@@ -68,23 +68,30 @@ instance per concurrent query. Disposing the client closes the socket.
 
 ## Running queries
 
-Every query is described by a `ChQuery` record. Start from
-`ChQuery.defaults` and override only the fields you need:
+A query is either a `SelectQuery` or an `InsertQuery` record. Start from the
+matching `defaults` and override only the fields you need:
 
 ```fsharp
-{ ChQuery.defaults with
+{ SelectQuery.defaults with
     Body     = "SELECT ..."
-    Results  = [...]            // SELECT — caller's target columns
-    Input    = [...]            // INSERT — caller's source columns
-    OnBlock  = fun rows -> ()   // SELECT — invoked per data block
-    OnInput  = None             // INSERT — multi-block streaming callback
+    Results  = [...]            // caller's target columns
+    OnBlock  = fun rows -> ()   // invoked per data block
     Settings = [...]            // query-scope key=value pairs
-    QueryId  = None             // optional UUID; auto-generated if None
-}
+    QueryId  = None }           // optional UUID; auto-generated if None
+
+{ InsertQuery.defaults with
+    Body     = "INSERT INTO ... VALUES"
+    Input    = [...]            // caller's source columns
+    OnInput  = None             // optional multi-block streaming callback
+    Settings = [...]
+    QueryId  = None }
 ```
 
-Pass to `client.DoAsync(query, ct)`. The same call handles SELECT, INSERT,
-and DDL — the mode is inferred from which fields you populated.
+Pass a `SelectQuery` to `client.Select(query, ct)`, an `InsertQuery` to
+`client.Insert(query, ct)` — each entry point accepts only its own record, so
+SELECT/INSERT mix-ups are a compile error. DDL is a `SelectQuery` with an empty
+`Results` (a statement that returns no rows). Calls are synchronous and block
+the calling thread; `ct` is reserved (accepted, not yet honoured).
 
 ## SELECT — minimal
 
@@ -97,20 +104,25 @@ let onBlock (rows: int) =
         printfn "%d %s" (n.Row(i)) (s.Row(i))
         totalRows <- totalRows + 1
 
-let q = { ChQuery.defaults with
+let q = { SelectQuery.defaults with
             Body = "SELECT toInt32(number) AS n, toString(number) AS s
                     FROM system.numbers LIMIT 1000"
             Results = [ { Name = "n"; Column = n }
                         { Name = "s"; Column = s } ]
             OnBlock = onBlock }
 
-client.DoAsync(q, ct).GetAwaiter().GetResult()
+client.Select(q, ct)
 ```
 
 Each `ColumnResult` has a `Name` (matched against the server's column
 name; pass `""` to accept by index only) and a `Column` instance that
 the driver decodes into in-place on every block. `OnBlock` runs after
 all columns are filled.
+
+> **Lifetime.** Decode is destructive — every block overwrites the previous
+> block's values in the same buffer. The `Results` columns (and any
+> `AsSpan()` view of them) are valid only *inside* `OnBlock`; copy out
+> anything you need to keep past the callback.
 
 ## INSERT — minimal
 
@@ -122,13 +134,13 @@ let score = ColFloat64()
 id.Append(1);    name.Append("alpha"); score.Append(1.5)
 id.Append(2);    name.Append("beta");  score.Append(2.5)
 
-let q = { ChQuery.defaults with
+let q = { InsertQuery.defaults with
             Body = "INSERT INTO my_table VALUES"
             Input = [ { Name = "id";    Column = id }
                       { Name = "name";  Column = name }
                       { Name = "score"; Column = score } ] }
 
-client.DoAsync(q, ct).GetAwaiter().GetResult()
+client.Insert(q, ct)
 ```
 
 ### Multi-block streaming insert
@@ -137,8 +149,8 @@ For sources too large to hold in memory, set `OnInput = Some next`. The
 key thing to internalise — and the bit that's easy to miss from the
 function signature alone — is **when** `next` fires:
 
-1. Caller pre-populates the Input columns *before* `DoAsync`.
-2. `DoAsync` sends the query and receives the server's schema header
+1. Caller pre-populates the Input columns *before* `Insert`.
+2. `Insert` sends the query and receives the server's schema header
    (used to drive `Infer` on each Input column — sets enum maps,
    decimal scales, etc.).
 3. Driver encodes whatever's in the columns NOW as **block #1** and
@@ -177,28 +189,28 @@ let onInput () =
     value.Reset()
     fillNext 100_000 > 0     // true: send another block; false: end stream.
 
-let q = { ChQuery.defaults with
+let q = { InsertQuery.defaults with
             Body    = "INSERT INTO my_table VALUES"
             Input   = [ { Name = "id";    Column = id }
                         { Name = "value"; Column = value } ]
             OnInput = Some onInput }
 
-client.DoAsync(q, ct).GetAwaiter().GetResult()
+client.Insert(q, ct)
 ```
 
 Common slip: starting with empty columns and expecting `next` to fill
 the first batch. It won't — `next` only fires *after* a block has been
-sent, so block #1 would be empty. Always pre-fill before `DoAsync`.
+sent, so block #1 would be empty. Always pre-fill before `Insert`.
 
-**Without OnInput** the contents of the Input columns at `DoAsync` time
+**Without OnInput** the contents of the Input columns at `Insert` time
 are sent as a single block. Use this for fixed-size payloads that
 already fit in memory.
 
-**OnBlock vs OnInput.** `OnBlock` fires for every server `Data` block
-during SELECT, after all decode targets in `Results` are filled. It
-does not fire for INSERT — the server's only `Data` packet for an
-INSERT is the schema header (rows=0), which the driver consumes
-internally to infer Input column types.
+**OnBlock vs OnInput.** `OnBlock` belongs to `SelectQuery` — it fires for
+every server `Data` block during a `Select`, after all decode targets in
+`Results` are filled. `InsertQuery` has no `OnBlock`: the server's only
+`Data` packet for an INSERT is the schema header (rows=0), which the driver
+consumes internally to infer Input column types.
 
 Note: on databases with `ENGINE = Atomic` (the default), DDL is async —
 add a short sleep or a synchronisation query between `CREATE TABLE` and
@@ -482,7 +494,7 @@ explorers):
 ```fsharp
 let auto = ColAuto()
 // build a one-column SELECT where you don't know the type:
-let q = { ChQuery.defaults with
+let q = { SelectQuery.defaults with
             Body = "SELECT 42 :: Decimal(9, 2)"
             Results = [ { Name = ""; Column = auto } ]
             OnBlock = fun _ ->
@@ -490,7 +502,7 @@ let q = { ChQuery.defaults with
                 | Some (:? ColDecimal32 as d) -> printfn "%O" (Decimal.fromInt32 (d.Row 0) 2)
                 | _ -> printfn "got %s" auto.Type }
 
-client.DoAsync(q, ct).GetAwaiter().GetResult()
+client.Select(q, ct)
 ```
 
 `ColAuto` handles every scalar — primitives, BFloat16, String, JSON,
@@ -520,9 +532,10 @@ ZSTD decoder).
 
 ## Query settings
 
-`ChQuery.Settings` is a list of `{ Key; Value; Important }` pairs sent
-with the query packet. `Important = true` makes the server error on an
-unknown key (otherwise it's silently ignored).
+Both `SelectQuery` and `InsertQuery` carry a `Settings` list of
+`{ Key; Value; Important }` pairs sent with the query packet.
+`Important = true` makes the server error on an unknown key (otherwise
+it's silently ignored).
 
 ```fsharp
 Settings = [ { Key = "max_block_size"; Value = "65536"; Important = true }
@@ -581,7 +594,7 @@ src/Ch.Proto/                          wire primitives + columns
   ColAuto.fs                            scalar auto-dispatch
 src/Ch.Client/                         connection lifecycle
   Options.fs                            ChOptions record
-  Client.fs                             Connect / Ping / Do
+  Client.fs                             Connect / Ping / Select / Insert
 src/Ch.Bench.Numbers/Program.fs        bench harness + --mixed / --insert smokes
 tests/Ch.Proto.Tests/Col*Tests.fs      golden roundtrip + per-column tests
 plans/

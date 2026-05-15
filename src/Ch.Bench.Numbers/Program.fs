@@ -71,14 +71,14 @@ let main argv =
     let ct = cts.Token
 
     try
-        use client = Client.ConnectAsync(opts, ct).GetAwaiter().GetResult()
+        use client = Client.Connect(opts, ct)
 
         if not quiet then
             eprintfn "Connected: %s rev=%d tz=%s"
                 client.Server.Name client.Server.Revision client.Server.Timezone
 
         if pingOnly then
-            client.PingAsync(ct).GetAwaiter().GetResult()
+            client.Ping(ct)
             if not quiet then eprintfn "Pong"
             0
         elif rows = -1L then
@@ -123,7 +123,7 @@ let main argv =
                     printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s | %g"
                         (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i)) (bf.RowFloat(i))
 
-            let q = { ChQuery.defaults with
+            let q = { SelectQuery.defaults with
                         Body =
                             "SELECT toInt32(number) AS n32, " +
                             "toString(number) AS s, " +
@@ -161,15 +161,15 @@ let main argv =
                             { Key = "allow_experimental_json_type"
                               Value = "1"; Important = false }
                         ] }
-            client.DoAsync(q, ct).GetAwaiter().GetResult()
+            client.Select(q, ct)
             0
         elif rows = -2L then
             // INSERT round-trip smoke. Creates a temp table, inserts 4 rows
             // via the driver, then SELECTs them back and prints them.
             let table = sprintf "ch_fsharp_insert_smoke_%d" (System.Diagnostics.Process.GetCurrentProcess().Id)
             let runStmt (sql: string) =
-                let q = { ChQuery.defaults with Body = sql }
-                client.DoAsync(q, ct).GetAwaiter().GetResult()
+                let q = { SelectQuery.defaults with Body = sql }
+                client.Select(q, ct)
 
             runStmt (sprintf "DROP TABLE IF EXISTS %s" table)
             runStmt (sprintf "CREATE TABLE %s (id Int32, name String, score Float64) ENGINE = Memory" table)
@@ -193,14 +193,14 @@ let main argv =
                     name.Append(s)
                     score.Append(f)
 
-                let insertQ = { ChQuery.defaults with
+                let insertQ = { InsertQuery.defaults with
                                   Body = sprintf "INSERT INTO %s VALUES" table
                                   Input = [
                                       { Name = "id"; Column = id }
                                       { Name = "name"; Column = name }
                                       { Name = "score"; Column = score }
                                   ] }
-                client.DoAsync(insertQ, ct).GetAwaiter().GetResult()
+                client.Insert(insertQ, ct)
                 eprintfn "INSERT: %d rows pushed" rowsToInsert.Length
 
                 // SELECT them back.
@@ -212,7 +212,7 @@ let main argv =
                     for j in 0 .. rows - 1 do
                         printfn "%d | %s | %g" (outId.Row(j)) (outName.Row(j)) (outScore.Row(j))
                         seen <- seen + 1
-                let selectQ = { ChQuery.defaults with
+                let selectQ = { SelectQuery.defaults with
                                   Body = sprintf "SELECT id, name, score FROM %s ORDER BY id" table
                                   Results = [
                                       { Name = "id"; Column = outId }
@@ -220,7 +220,7 @@ let main argv =
                                       { Name = "score"; Column = outScore }
                                   ]
                                   OnBlock = printRow }
-                client.DoAsync(selectQ, ct).GetAwaiter().GetResult()
+                client.Select(selectQ, ct)
                 if seen <> rowsToInsert.Length then
                     eprintfn "FAIL: expected %d rows back, got %d" rowsToInsert.Length seen
                     1
@@ -241,7 +241,7 @@ let main argv =
                 totalSum <- totalSum + s
                 totalRows <- totalRows + int64 n
 
-            let q = { ChQuery.defaults with
+            let q = { SelectQuery.defaults with
                         Body = sprintf "SELECT number FROM system.numbers_mt LIMIT %d" rows
                         Results = [ { Name = "number"; Column = col } ]
                         OnBlock = onBlock
@@ -250,7 +250,7 @@ let main argv =
                         ] }
 
             let sw = Stopwatch.StartNew()
-            client.DoAsync(q, ct).GetAwaiter().GetResult()
+            client.Select(q, ct)
             sw.Stop()
 
             // Correctness checks.
