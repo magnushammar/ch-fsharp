@@ -31,12 +31,13 @@
     <Compile Include="Block.fs" />
     <Compile Include="Int256.fs" />
     <Compile Include="Columns.fs" />
+    <Compile Include="ColArr.fs" />
+    <Compile Include="ColNullable.fs" />
+    <Compile Include="ColLowCardinality.fs" />
+    <Compile Include="ColPrimitive.fs" />
     <Compile Include="ColStr.fs" />
     <Compile Include="ColTime.fs" />
     <Compile Include="ColFixed.fs" />
-    <Compile Include="ColLowCardinality.fs" />
-    <Compile Include="ColNullable.fs" />
-    <Compile Include="ColArr.fs" />
     <Compile Include="ColMap.fs" />
     <Compile Include="ColTuple.fs" />
     <Compile Include="ColDecimal.fs" />

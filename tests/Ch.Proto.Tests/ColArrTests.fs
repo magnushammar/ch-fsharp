@@ -94,6 +94,6 @@ let tests = testList "ColArr" [
 
         col.Reset()
         Expect.equal col.Rows 0 "rows"
-        Expect.equal col.Offsets.Rows 0 "offsets"
+        Expect.equal col.OffsetsCount 0 "offsets"
         Expect.equal col.Inner.Rows 0 "inner"
 ]

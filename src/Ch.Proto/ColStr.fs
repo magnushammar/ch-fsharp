@@ -118,3 +118,12 @@ type ColStr() =
     interface IColumnOf<string> with
         member this.Append(s) = this.Append(s)
         member this.Row(i) = this.Row(i)
+
+    interface IArrayable with
+        member this.Array() = ColArr<string>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<string>(this) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() = ColLowCardinality<string>(this) :> IColumnResult

@@ -102,6 +102,15 @@ type ColEnum8() =
     interface IInferable with
         member this.Infer(t) = this.Infer(t)
 
+    interface IArrayable with
+        member this.Array() = ColArr<string>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<string>(this) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() = ColLowCardinality<string>(this) :> IColumnResult
+
 
 /// `Enum16` — Int16 wire format with name⇆int mapping. Same shape as
 /// `ColEnum8` but 16-bit wire values, range -32768..32767.
@@ -187,3 +196,12 @@ type ColEnum16() =
 
     interface IInferable with
         member this.Infer(t) = this.Infer(t)
+
+    interface IArrayable with
+        member this.Array() = ColArr<string>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<string>(this) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() = ColLowCardinality<string>(this) :> IColumnResult

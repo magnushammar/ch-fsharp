@@ -48,3 +48,12 @@ type ColJSONStr() =
     interface IStatefulColumn with
         member this.DecodeState(r) = this.DecodeState(r)
         member this.EncodeState(b) = this.EncodeState(b)
+
+    interface IArrayable with
+        member this.Array() = ColArr<string>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<string>(this) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() = ColLowCardinality<string>(this) :> IColumnResult

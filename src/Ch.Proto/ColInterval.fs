@@ -100,3 +100,12 @@ type ColInterval() =
 
     interface IInferable with
         member this.Infer(t) = this.Infer(t)
+
+    interface IArrayable with
+        member this.Array() = ColArr<Interval>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<Interval>(this) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() = ColLowCardinality<Interval>(this) :> IColumnResult

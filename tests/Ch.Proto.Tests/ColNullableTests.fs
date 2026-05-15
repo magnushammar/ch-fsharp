@@ -72,6 +72,6 @@ let tests = testList "ColNullable" [
         Expect.equal col.Rows 2 "rows pre-reset"
         col.Reset()
         Expect.equal col.Rows 0 "rows"
-        Expect.equal col.Nulls.Rows 0 "nulls"
+        Expect.equal col.NullsCount 0 "nulls"
         Expect.equal col.Inner.Rows 0 "inner"
 ]

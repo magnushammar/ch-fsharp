@@ -22,7 +22,8 @@ let private roundtrip<'T
         and 'T : struct
         and 'T : (new : unit -> 'T)
         and 'T :> ValueType
-        and 'T : equality>
+        and 'T : equality
+        and 'T : not null>
         (newCol: unit -> ColPrimitive<'T>)
         (rows: int)
         (mkValue: int -> 'T)

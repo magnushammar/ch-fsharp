@@ -58,3 +58,12 @@ type ColPoint() =
     interface IColumnOf<Point> with
         member this.Append(v) = this.Append(v)
         member this.Row(i) = this.Row(i)
+
+    interface IArrayable with
+        member this.Array() = ColArr<Point>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<Point>(this) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() = ColLowCardinality<Point>(this) :> IColumnResult

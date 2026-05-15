@@ -52,3 +52,9 @@ type ColNothing() =
     interface IColumnOf<Nothing> with
         member this.Append(v) = this.Append(v)
         member this.Row(i) = this.Row(i)
+
+    interface IArrayable with
+        member this.Array() = ColArr<Nothing>(this) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() = ColNullable<Nothing>(this) :> IColumnResult

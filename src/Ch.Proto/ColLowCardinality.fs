@@ -215,3 +215,8 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
     interface IStatefulColumn with
         member this.DecodeState(r) = this.DecodeState(r)
         member this.EncodeState(b) = this.EncodeState(b)
+
+    /// Recursive composition: `Array(LowCardinality(T))` → wrap self in a ColArr.
+    interface IArrayable with
+        member this.Array() =
+            ColArr<'T>(this :> IColumnOf<'T>) :> IColumnResult
