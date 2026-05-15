@@ -157,14 +157,35 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **Atomic-DB INSERT visibility race**: `Ch.Bench.Numbers --insert`
-   flakes because the default `default` database is an Atomic engine,
-   where `CREATE TABLE` returns before the table is visible. The
-   200 ms sleep in the smoke isn't enough. Real fix options: query
-   `system.tables` until the table appears, switch the smoke to a
-   non-Atomic engine, or split the smoke into create-and-poll +
-   insert-and-verify halves. Pure tooling change; no driver code
-   touched.
+1. **`--insert` driver-side timing race** (was misdiagnosed as
+   Atomic-DB visibility; actually a driver bug):
+   - Reliably fails with `INSERT: 4 rows pushed / FAIL: 0 rows back`.
+   - Server `query_log` shows `INSERT INTO X (cols) FORMAT Native —
+     written_rows = 0`, i.e. server parses the INSERT but receives
+     zero data rows.
+   - **NOT** a CREATE-visibility race: fails identically with no
+     sleep, 200ms sleep, 2s sleep between CREATE and INSERT, AND
+     with a pre-existing externally-created table (no CREATE in the
+     run at all).
+   - **IS** a timing race at the send point: a `Thread.Sleep(50)` in
+     `Client.fs SendInput` between `EncodeBlankBlock()` and
+     `buf.WriteToAndReset(stream)` makes it pass deterministically.
+     `Sleep(5)` is not enough. The original session's "adding
+     `eprintfn` in the receive loop fixes it" observation also fits:
+     it's the latency between encode-finish and wire-flush that
+     matters, not the contents.
+   - Verified wire bytes are correct (3 columns × 4 rows, BlockInfo
+     with BucketNum=-1, valid uvarints) via in-process hex dump.
+   - **Mechanism unknown.** Next-session candidates: (a) is the
+     external-tables blank marker after the Query packet being
+     misinterpreted as an input-data end-of-data marker by the
+     server, ending the INSERT before our real data lands?
+     (b) is there a Reader buffer state leak between the schema-
+     header decode and the SendInput write? (c) compare ch-go's
+     INSERT wire trace byte-by-byte. (d) tcpdump server-side.
+   - **Do not ship a `Thread.Sleep` workaround** — the cardinal rule
+     forbids "doesn't hurt performance" violations; an unconditional
+     50ms per INSERT hurts high-throughput inserts.
 
 2. **Connection pool**: ch-go has it in a separate `chpool` package and
    explicitly disclaims it as out-of-core. Worth a small F# port for

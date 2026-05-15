@@ -187,8 +187,13 @@ let main argv =
 
             runStmt (sprintf "DROP TABLE IF EXISTS %s" table)
             runStmt (sprintf "CREATE TABLE %s (id Int32, name String, score Float64) ENGINE = Memory" table)
-            // Atomic DB engine makes CREATE asynchronous — wait a moment for
-            // visibility before the INSERT (which would otherwise race).
+            // Atomic DB engine makes CREATE asynchronous. Note: a longer
+            // sleep does NOT fix the current --insert failure (verified
+            // empirically — 0/2000/no-sleep all fail identically), and
+            // a pre-existing externally-created table also fails. The
+            // root cause is in the driver INSERT path itself
+            // (`server_log: written_rows=0` despite "INSERT: 4 rows
+            // pushed" from our side). See HANDOVER milestone #1.
             System.Threading.Thread.Sleep(200)
 
             try
