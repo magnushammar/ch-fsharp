@@ -48,7 +48,7 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>
     let mutable dictArray : 'T array = Array.Empty<'T>()
     let mutable dictRows : int = 0
     /// Lazy flag — dictArray is populated via `inner.Row(k)` only when
-    /// `Row(i)` / `Dictionary` is first called after a `DecodeColumn`.
+    /// `Row(i)` / `DictionarySpan` is first called after a `DecodeColumn`.
     /// Byte-span consumers (`RowSpan`) bypass this entirely and skip the
     /// per-block string/value allocations.
     let mutable dictMaterialized : bool = false
@@ -152,20 +152,22 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>
     ///     dense `Values` list (DESIGN_CHOICES §8).
     member _.Rows = max tempKeys.Count rowCount
 
-    /// Exposed for perf-sensitive consumers: iterate Keys + Inner directly to
-    /// avoid Row(i)'s per-row branch on keyWidth. Method (not property)
-    /// for surface consistency with the other span accessors.
+    /// Exposed for perf-sensitive consumers: iterate `KeysSpan` + `Inner`
+    /// directly to avoid `Row(i)`'s per-row branch on `keyWidth`. The
+    /// `Span` suffix matches the rest of the codebase's parameterless
+    /// span accessors (`NullsSpan`, `ValueSpan`, `OffsetsSpan`).
     member _.Inner = inner
-    member _.Keys() : ReadOnlySpan<byte> = ReadOnlySpan(keys, 0, rowCount * keyWidth)
+    member _.KeysSpan() : ReadOnlySpan<byte> =
+        ReadOnlySpan(keys, 0, rowCount * keyWidth)
     member _.KeyWidth = keyWidth
     member _.DictRows = dictRows
-    /// Materialised dictionary entries: `Dictionary().[k] = inner.Row(k)`
+    /// Materialised dictionary entries: `DictionarySpan().[k] = inner.Row(k)`
     /// for k in 0..DictRows-1. Materialisation is lazy — the first
-    /// `Dictionary` / `Row(i)` call after `DecodeColumn` populates the
-    /// array; byte-span consumers using `RowSpan(i)` skip materialisation
-    /// entirely. Method (not property) for surface consistency.
-    /// Lifetime: valid until next `DecodeColumn` / `Reset`.
-    member _.Dictionary() : ReadOnlySpan<'T> =
+    /// `DictionarySpan` / `Row(i)` call after `DecodeColumn` populates
+    /// the array; byte-span consumers using `RowSpan(i)` skip
+    /// materialisation entirely. Lifetime: valid until next
+    /// `DecodeColumn` / `Reset`.
+    member _.DictionarySpan() : ReadOnlySpan<'T> =
         ensureDictMaterialized ()
         ReadOnlySpan(dictArray, 0, dictRows)
 
@@ -192,9 +194,9 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>
             tempKeys.Add(idx)
 
     /// Row i — fast path: dictArray indexed by readKeyAt(i). The dict
-    /// is materialised lazily on the first `Row` / `Dictionary` call
-    /// after each `DecodeColumn`; subsequent calls hit the cached array
-    /// (the materialised branch becomes the predicted path).
+    /// is materialised lazily on the first `Row` / `DictionarySpan`
+    /// call after each `DecodeColumn`; subsequent calls hit the cached
+    /// array (the materialised branch becomes the predicted path).
     member _.Row(i: int) : 'T =
         ensureDictMaterialized ()
         dictArray.[readKeyAt i]

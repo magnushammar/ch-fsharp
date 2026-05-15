@@ -66,8 +66,8 @@ let tests = testList "ColLowCardinality" [
         Expect.equal dec.DictRows 1 "dict rows"
         Expect.equal dec.Rows 10 "rows"
         Expect.equal dec.KeyWidth 1 "key width"
-        Expect.equal (dec.Dictionary().[0]) "only-one" "dict entry"
-        for k in dec.Keys().ToArray() do Expect.equal k 0uy "key byte"
+        Expect.equal (dec.DictionarySpan().[0]) "only-one" "dict entry"
+        for k in dec.KeysSpan().ToArray() do Expect.equal k 0uy "key byte"
 
     testCase "<string> empty column encodes to empty bytes" <| fun _ ->
         let lc = ColLowCardinality<string>(ColStr())
