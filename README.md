@@ -698,6 +698,46 @@ All other types match literally. Columns that implement `IInferable`
 (`ColEnum8/16`, `ColDateTime64`, `ColInterval`, `ColAuto`) receive the
 full server-sent type string before the compat check and self-configure.
 
+### Watch out for `LowCardinality(...)`
+
+`ColumnType.normalize` deliberately **does not** strip
+`LowCardinality(_)` wrappers — LC has a different wire format (state
+header + dict + key-width + per-row keys vs raw values), so accepting
+one in place of the other would be wrong.
+
+The most common way to trip this is a SELECT that calls a scalar
+function on an LC column. **`toString(symbol)` for a `symbol
+LowCardinality(String)` returns `LowCardinality(String)`, not
+`String`** — ClickHouse keeps the dictionary representation through
+many transformations as a performance optimisation, and won't
+materialise it back to a flat type unless you ask. So if you declared
+`ColStr()` on the F# side and the server sends
+`LowCardinality(String)`, validation throws:
+
+```
+column 'sym' type mismatch: server 'LowCardinality(String)', client 'String'
+```
+
+Three ways to fix it, in rough order of usefulness:
+
+1. **Declare the F# column to match the wire** —
+   `ColLowCardinality<string>(ColStr())` instead of `ColStr()`. No SQL
+   change. `Row(i)` still returns `string`. Usually best when your
+   schema actually is LC: you skip the server materialising the dict
+   only for the driver to re-dedupe on the .NET side. For tight
+   hot loops over LC strings, also see `KeysSpan()` /
+   `DictionarySpan()` / `RowSpan(i)` (zero-alloc byte view).
+
+2. **`CAST(symbol AS String)` in the SQL** — explicit "give me a flat
+   String" request; server materialises the dict and sends raw bytes.
+   Fine for ad-hoc / low-volume queries. (`toString(symbol)` is
+   *not* enough — it preserves the LC wrapper. Use `CAST`.)
+
+3. **Use `ColAuto`** (Path 2) — `ColAuto.build` constructs the right
+   concrete column from whatever the server sends, so schema-evolution
+   surprises don't break your SQL. Trade-off: virtual dispatch on the
+   decode path; fine for tooling, not for production hot loops.
+
 ---
 
 ## Repo layout
