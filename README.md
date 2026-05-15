@@ -698,45 +698,76 @@ All other types match literally. Columns that implement `IInferable`
 (`ColEnum8/16`, `ColDateTime64`, `ColInterval`, `ColAuto`) receive the
 full server-sent type string before the compat check and self-configure.
 
-### Watch out for `LowCardinality(...)`
+### Watch out for wrapper types
 
-`ColumnType.normalize` deliberately **does not** strip
-`LowCardinality(_)` wrappers — LC has a different wire format (state
-header + dict + key-width + per-row keys vs raw values), so accepting
-one in place of the other would be wrong.
+`ColumnType.normalize` folds type-parameter sugar (Decimal precision,
+Enum mappings, DateTime timezones) but deliberately **does not** strip
+the wrapper types — `Nullable(T)`, `LowCardinality(T)`, `Array(T)`,
+`Map(K, V)`, `Tuple(...)`. Each wrapper has a distinct wire format
+(null mask, dict + keys, offsets, etc.), so accepting one in place of
+the unwrapped type would corrupt the decode.
 
-The most common way to trip this is a SELECT that calls a scalar
-function on an LC column. **`toString(symbol)` for a `symbol
-LowCardinality(String)` returns `LowCardinality(String)`, not
-`String`** — ClickHouse keeps the dictionary representation through
-many transformations as a performance optimisation, and won't
-materialise it back to a flat type unless you ask. So if you declared
-`ColStr()` on the F# side and the server sends
-`LowCardinality(String)`, validation throws:
+This is the most common source of `column 'X' type mismatch: server
+'Y', client 'Z'` errors. The driver's error message includes a hint
+pointing at the likely fix; the two shapes that come up in practice
+are described below.
 
-```
-column 'sym' type mismatch: server 'LowCardinality(String)', client 'String'
-```
+#### `Nullable(...)` asymmetry
 
-Three ways to fix it, in rough order of usefulness:
+You declared `ColNullable<float>(ColFloat64())` and the server sends
+`Float64`. Either the column isn't actually nullable in the schema,
+or the SQL flattens it implicitly (most aggregates like `min` /
+`max` / `sum` drop the Nullable; `assumeNotNull(col)` /
+`ifNull(col, d)` strip it explicitly). The wrappers don't auto-line-up.
+
+Fixes, in order of usefulness:
+
+1. **Drop the `ColNullable` wrapper** — declare `ColFloat64()` directly.
+   Almost always correct: if the SQL doesn't surface nulls, the F#
+   side shouldn't pretend it does.
+2. **Force Nullable in SQL** — `toNullable(col)` or
+   `CAST(col AS Nullable(Float64))`. Pays a null-mask byte per row for
+   nothing if the data is genuinely non-null; usually the wrong fix.
+
+The inverse (server sends `Nullable(...)`, client declared flat) means
+the column really is nullable — declare `ColNullable<'T>(inner)` on
+the F# side. The driver's hint will tell you which way the asymmetry
+runs.
+
+#### `LowCardinality(...)` asymmetry
+
+You declared `ColStr()` and the server sends `LowCardinality(String)`.
+**`toString(symbol)` on a `symbol LowCardinality(String)` column
+preserves the wrapper rather than flattening to `String`** —
+ClickHouse keeps the dictionary representation through many
+transformations as a performance optimisation, and won't materialise
+it back unless you ask explicitly. So a query like
+`SELECT toString(symbol) FROM trades` will send
+`LowCardinality(String)` over a `ColStr()` and the driver will throw.
+
+Fixes, in order of usefulness:
 
 1. **Declare the F# column to match the wire** —
    `ColLowCardinality<string>(ColStr())` instead of `ColStr()`. No SQL
-   change. `Row(i)` still returns `string`. Usually best when your
-   schema actually is LC: you skip the server materialising the dict
-   only for the driver to re-dedupe on the .NET side. For tight
-   hot loops over LC strings, also see `KeysSpan()` /
-   `DictionarySpan()` / `RowSpan(i)` (zero-alloc byte view).
+   change. `Row(i)` still returns `string`. Usually best when the
+   schema is actually LC: you skip the server materialising the dict
+   only for the driver to re-dedupe on the .NET side. For tight hot
+   loops over LC strings, see `KeysSpan()` / `DictionarySpan()` /
+   `RowSpan(i)` (zero-alloc byte view).
+2. **`CAST(symbol AS String)` in the SQL** — explicit flatten.
+   `toString(symbol)` is *not* enough; you need `CAST`. Fine for
+   ad-hoc / low-volume queries.
+3. **Use `ColAuto`** (Path 2) — adapts to whatever the server sends,
+   so schema evolution doesn't break the SQL. Trade-off: virtual
+   dispatch on the decode path; fine for tooling, not for production
+   hot loops.
 
-2. **`CAST(symbol AS String)` in the SQL** — explicit "give me a flat
-   String" request; server materialises the dict and sends raw bytes.
-   Fine for ad-hoc / low-volume queries. (`toString(symbol)` is
-   *not* enough — it preserves the LC wrapper. Use `CAST`.)
+#### Other wrappers
 
-3. **Use `ColAuto`** (Path 2) — `ColAuto.build` constructs the right
-   concrete column from whatever the server sends, so schema-evolution
-   surprises don't break your SQL. Trade-off: virtual dispatch on the
-   decode path; fine for tooling, not for production hot loops.
+`Array(T)` / `Map(K, V)` / `Tuple(...)` have the same wire-distinctness
+property, but you'd never accidentally swap them with the inner type
+in practice — the structural difference is too visible to miss when
+you're writing the F# column.
 
 ---
 

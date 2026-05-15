@@ -47,6 +47,31 @@ module ColumnType =
     let isCompatible (clientType: string) (serverType: string) : bool =
         normalize clientType = normalize serverType
 
+    /// Diagnose a type-mismatch and return a short hint suggesting a
+    /// fix, or `""` if the shape isn't a recognised pattern. Called by
+    /// `Client.fs` when the per-block compatibility check fails, so the
+    /// error message points at the actual cause instead of leaving the
+    /// consumer to figure it out. Catches the four most common shapes:
+    /// client / server (a)synchronously wrapping the other in
+    /// `Nullable(...)` or `LowCardinality(...)`.
+    let mismatchHint (clientType: string) (serverType: string) : string =
+        let peel (prefix: string) (s: string) =
+            let opener = prefix + "("
+            if s.StartsWith(opener) && s.EndsWith(")") then
+                Some (s.Substring(opener.Length, s.Length - opener.Length - 1))
+            else None
+        match peel "Nullable" clientType, peel "Nullable" serverType,
+              peel "LowCardinality" clientType, peel "LowCardinality" serverType with
+        | Some inner, _, _, _ when inner = serverType ->
+            " — client wraps in `Nullable(...)`; either drop the ColNullable<...> wrapper on the F# side (the column isn't actually nullable), or wrap the SQL expression with `toNullable(...)` / `CAST(... AS Nullable(T))`."
+        | _, Some inner, _, _ when inner = clientType ->
+            " — server sends `Nullable(...)` over a non-Nullable client column. Declare it as `ColNullable<'T>(inner)` on the F# side, or strip in SQL via `assumeNotNull(...)` / `ifNull(...)`."
+        | _, _, Some inner, _ when inner = serverType ->
+            " — client wraps in `LowCardinality(...)` but the server sends a flat type. Either drop the ColLowCardinality<...> wrapper on the F# side, or `toLowCardinality(...)` / `CAST(... AS LowCardinality(T))` in SQL."
+        | _, _, _, Some inner when inner = clientType ->
+            " — server sends `LowCardinality(...)` over a flat client column. Declare it as `ColLowCardinality<'T>(inner)` on the F# side (recommended, skips server-side dict materialisation), or `CAST(col AS T)` in SQL to strip the LC wrapper. (`toString(...)` preserves the wrapper — use `CAST`.) See README § \"Watch out for wrapper types\"."
+        | _ -> ""
+
 /// Shared parsing helpers for ClickHouse type strings.
 ///
 /// ClickHouse type strings nest parens (`Array(Nullable(Int32))`) and

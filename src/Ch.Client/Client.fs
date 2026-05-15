@@ -310,8 +310,9 @@ type Client private (
                 | :? IInferable as inf -> inf.Infer(typ)
                 | _ -> ()
                 if not (ColumnType.isCompatible target.Column.Type typ) then
+                    let hint = ColumnType.mismatchHint target.Column.Type typ
                     raise (InvalidDataException
-                        $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'")
+                        $"column '{name}' type mismatch: server '{typ}', client '{target.Column.Type}'{hint}")
                 if not insertHeaderMode then
                     // State header (e.g. LowCardinality) decodes before
                     // the body — but only when the block has rows.

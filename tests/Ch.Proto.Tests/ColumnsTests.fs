@@ -93,4 +93,26 @@ let tests = testList "Columns" [
     testCase "ColUInt128 roundtrips against golden" <| fun _ ->
         roundtrip (fun () -> ColUInt128() :> ColPrimitive<System.UInt128>)
             50 (fun i -> System.UInt128(0UL, uint64 i)) "col_uint128" "UInt128"
+
+    testCase "ColumnType.mismatchHint diagnoses Nullable wrapper asymmetry" <| fun _ ->
+        // Client wraps server in Nullable → drop the wrapper on F# side.
+        let h1 = ColumnType.mismatchHint "Nullable(Float64)" "Float64"
+        Expect.stringContains h1 "drop the ColNullable" "client-side Nullable hint"
+
+        // Server wraps client in Nullable → add the wrapper on F# side.
+        let h2 = ColumnType.mismatchHint "Float64" "Nullable(Float64)"
+        Expect.stringContains h2 "ColNullable<'T>(inner)" "server-side Nullable hint"
+
+    testCase "ColumnType.mismatchHint diagnoses LowCardinality wrapper asymmetry" <| fun _ ->
+        let h1 = ColumnType.mismatchHint "LowCardinality(String)" "String"
+        Expect.stringContains h1 "drop the ColLowCardinality" "client-side LC hint"
+
+        // The toString-on-LC trap (server wraps client in LC).
+        let h2 = ColumnType.mismatchHint "String" "LowCardinality(String)"
+        Expect.stringContains h2 "ColLowCardinality<'T>(inner)" "server-side LC hint"
+        Expect.stringContains h2 "toString(...)" "calls out the toString gotcha"
+
+    testCase "ColumnType.mismatchHint returns empty for unrecognised shapes" <| fun _ ->
+        Expect.equal (ColumnType.mismatchHint "Int32" "Float64") "" "different scalars: no hint"
+        Expect.equal (ColumnType.mismatchHint "Array(Int32)" "Array(Float64)") "" "different array inners: no hint"
 ]
