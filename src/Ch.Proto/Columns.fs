@@ -108,3 +108,27 @@ type INullable =
 /// must satisfy `equality + not null`.
 type ILowCardinality =
     abstract LowCardinality : unit -> IColumnResult
+
+/// Bulk-append facet — column accepts a contiguous span of `'T` in one
+/// shot. `ColPrimitive<'T>` implements this via `MemoryMarshal.Cast` for
+/// zero-copy byte writes. Composite wrappers (`ColArr` / `ColNullable`)
+/// dispatch to inner when present and fall back to per-row `Append`
+/// otherwise. Lifetime: span is consumed during the call; no aliasing.
+type IBulkAppendable<'T> =
+    abstract AppendRange : System.ReadOnlySpan<'T> -> unit
+
+/// Bulk-read facet — column exposes its row buffer as a typed span
+/// aliasing internal storage. `ColPrimitive<'T>` implements this via
+/// `MemoryMarshal.Cast` over the raw byte buffer. Lifetime: returned
+/// span is valid until the next `DecodeColumn` / `Reset` / `Append` /
+/// `AppendRange` on the column.
+type IBulkReadable<'T> =
+    abstract AsSpan : unit -> System.ReadOnlySpan<'T>
+
+/// Per-row raw byte view, irrespective of the column's typed `'T`.
+/// Implemented by `ColStr` (UTF-8 bytes) and the `ColFixedBytes` family
+/// (fixed-N bytes). Lets byte-land consumers skip UTF-8 decoding /
+/// `.ToArray()` materialisation; also the substrate
+/// `ColLowCardinality.RowSpan` dispatches through.
+type IRowBytes =
+    abstract RowBytes : int -> System.ReadOnlySpan<byte>

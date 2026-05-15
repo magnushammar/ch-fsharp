@@ -114,6 +114,12 @@ type ColPrimitive<'T
         member this.LowCardinality() =
             ColLowCardinality<'T>(this :> IColumnOf<'T>) :> IColumnResult
 
+    interface IBulkAppendable<'T> with
+        member this.AppendRange(vs) = this.AppendRange(vs)
+
+    interface IBulkReadable<'T> with
+        member this.AsSpan() = this.AsSpan()
+
 
 [<Sealed>] type ColInt8()    = inherit ColPrimitive<int8>("Int8")
 [<Sealed>] type ColInt16()   = inherit ColPrimitive<int16>("Int16")

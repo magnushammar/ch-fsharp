@@ -127,3 +127,6 @@ type ColStr() =
 
     interface ILowCardinality with
         member this.LowCardinality() = ColLowCardinality<string>(this) :> IColumnResult
+
+    interface IRowBytes with
+        member this.RowBytes(i) = this.RowSpan(i)
