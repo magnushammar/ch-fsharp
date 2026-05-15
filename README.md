@@ -212,10 +212,11 @@ every server `Data` block during a `Select`, after all decode targets in
 `Data` packet for an INSERT is the schema header (rows=0), which the driver
 consumes internally to infer Input column types.
 
-Note: on databases with `ENGINE = Atomic` (the default), DDL is async —
-add a short sleep or a synchronisation query between `CREATE TABLE` and
-your INSERT, otherwise the visibility race intermittently truncates the
-result set.
+Note: the `--insert` smoke currently fails on a known driver-side
+INSERT framing race (the prior "Atomic database-engine DDL visibility"
+explanation turned out to be wrong — pre-existing tables fail
+identically). The plain SELECT and `--mixed` paths are unaffected.
+See `plans/HANDOVER.md` milestone #1 for the investigation notes.
 
 ---
 

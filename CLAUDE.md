@@ -213,11 +213,19 @@ These will bite if you don't know them:
   in `Columns.fs` folds `Decimal(P, S)`, parameterized `Enum8(...)`,
   and `DateTime('tz')` / `DateTime64(N, 'tz')` to bare forms. Extend
   that table when adding new parameterized columns.
-- **Atomic DB engine has a DDL visibility race.** On the default
-  `default` database (`ENGINE = Atomic`), `CREATE TABLE` returns before
-  the table is visible. The `--insert` smoke sleeps 200 ms; production
-  code needs a sync query between CREATE and INSERT. This is a server
-  behavior, not a driver bug.
+- **`--insert` smoke has a known driver-side timing race.** Server
+  receives the INSERT but parses zero data rows (`query_log:
+  written_rows=0`) even though the encoded bytes are correct. The
+  `Thread.Sleep(200)` between CREATE and INSERT doesn't actually fix
+  it (verified — pre-existing tables also fail). Active hypothesis:
+  the external-tables blank sentinel sent right after the Query
+  packet gets misclassified as an input-data end-of-data marker
+  under tight timing, finalising the INSERT before our real data
+  block arrives. See `plans/HANDOVER.md` milestone #1.
+  *(Previously misattributed to ClickHouse's `Atomic` database engine
+  — that's a server-side metadata-management mode, nothing to do with
+  ACID transactions, and not actually our bug. The misnomer caused
+  months of misdiagnosis; don't repeat it.)*
 - **One column type per file** (`src/Ch.Proto/Col*.fs`). Close cousins
   may share a file (e.g. `ColTime.fs` holds Date / Date32 / DateTime /
   DateTime64 / IPv4; `ColFixed.fs` holds FixedStr / UUID / IPv6).

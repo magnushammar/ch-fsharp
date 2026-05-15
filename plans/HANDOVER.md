@@ -63,10 +63,11 @@ Enum8, Point, IntervalDay, JSON, BFloat16, and
 parameterised / composite (Array / Nullable / LC / Tuple / Map) type
 from a server-sent type string for ad-hoc receive.
 
-> `--insert` currently flakes on the pre-existing Atomic-DB visibility
-> race documented under "Gotchas" — not a driver regression; CREATE
-> TABLE returns before the table is visible to the subsequent INSERT.
-> See "Next milestones" for the planned mitigation.
+> `--insert` currently fails on a driver-side INSERT framing race
+> (mechanism unknown, hypothesis in milestone #1). NOT the previously-
+> suspected "Atomic database-engine DDL visibility" issue — that was a
+> misdiagnosis; pre-existing tables fail identically. SELECT and
+> `--mixed` paths are unaffected.
 
 ## Repo map
 
@@ -157,8 +158,10 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **`--insert` driver-side timing race** (was misdiagnosed as
-   Atomic-DB visibility; actually a driver bug):
+1. **`--insert` driver-side timing race** (was misdiagnosed as a
+   `Atomic` database-engine DDL-visibility race — that's a
+   server-side metadata mode, not ACID atomicity, and not actually
+   our bug):
    - Reliably fails with `INSERT: 4 rows pushed / FAIL: 0 rows back`.
    - Server `query_log` shows `INSERT INTO X (cols) FORMAT Native —
      written_rows = 0`, i.e. server parses the INSERT but receives

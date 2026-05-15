@@ -126,12 +126,18 @@ but not yet started; they will wrap the low-level API.
     already appended for INSERT. The handler now skips body decode
     entirely when `insertHeader` is true.
 
-14. **DDL on Atomic database engine returns before tables are
-    visible.** The `--insert` smoke adds a 200 ms sleep between
-    CREATE and INSERT to absorb the race. This is a server-side
-    visibility issue (the default `default` database is `Atomic`),
-    not a driver bug — `mutations_sync = 2` and friends address
-    similar concerns for DML but not for DDL.
+14. **`--insert` smoke fails with a driver-side timing race.**
+    Server's `query_log` reports `written_rows=0` for our INSERTs
+    despite the wire bytes being correct. The 200 ms sleep in the
+    smoke between CREATE and INSERT is a vestige of an *incorrect*
+    earlier diagnosis ("Atomic database-engine DDL visibility race")
+    that this round disproved — pre-existing tables also fail, and
+    the actual passing-vs-failing threshold lives in `SendInput`'s
+    encode→flush gap. The real mechanism is unknown; current best
+    hypothesis is that the external-tables blank sentinel sent right
+    after the Query packet is misclassified by the server as an
+    input-data end-of-data marker under tight timing, ending the
+    INSERT context before the data block lands. See HANDOVER #1.
 
 ### `ColLowCardinality` — the load-bearing departure
 
