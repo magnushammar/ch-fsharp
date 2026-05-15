@@ -96,4 +96,38 @@ let tests = testList "ColArr" [
         Expect.equal col.Rows 0 "rows"
         Expect.equal col.OffsetsCount 0 "offsets"
         Expect.equal col.Inner.Rows 0 "inner"
+
+    testCase "AppendSpan dispatches to IBulkAppendable for primitive inner" <| fun _ ->
+        // ColInt32 implements IBulkAppendable<int32> on the ColPrimitive base.
+        // The Append path should now bulk-copy via MemoryMarshal rather than
+        // looping per-element.
+        let col = ColArr<int32>(ColInt32())
+        let src = [| 10; 20; 30 |]
+        col.AppendSpan(ReadOnlySpan(src))
+        Expect.equal col.OffsetsCount 1 "one row"
+        Expect.equal col.Inner.Rows 3 "three inner rows"
+        Expect.equal (col.Row(0)) [| 10; 20; 30 |] "row 0 round-trips"
+
+    testCase "RowSpan returns zero-copy slice for primitive inner" <| fun _ ->
+        let col = ColArr<int32>(ColInt32())
+        col.AppendSpan(ReadOnlySpan([| 1; 2; 3 |]))
+        col.AppendSpan(ReadOnlySpan([| 4; 5 |]))
+        let row0 = col.RowSpan(0)
+        let row1 = col.RowSpan(1)
+        Expect.equal row0.Length 3 "row 0 length"
+        Expect.equal row1.Length 2 "row 1 length"
+        Expect.equal row0.[0] 1 "row 0 [0]"
+        Expect.equal row0.[2] 3 "row 0 [2]"
+        Expect.equal row1.[0] 4 "row 1 [0]"
+        Expect.equal row1.[1] 5 "row 1 [1]"
+
+    testCase "RowSpan falls back to allocation for non-primitive inner" <| fun _ ->
+        // ColStr is not IBulkReadable<string>; RowSpan should still work
+        // by materialising Row(i) and returning a span over the result.
+        let col = ColArr<string>(ColStr())
+        col.Append([| "a"; "bb"; "ccc" |])
+        let row = col.RowSpan(0)
+        Expect.equal row.Length 3 "fallback row length"
+        Expect.equal row.[0] "a" "fallback [0]"
+        Expect.equal row.[2] "ccc" "fallback [2]"
 ]

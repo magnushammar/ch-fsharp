@@ -55,17 +55,39 @@ type ColArr<'T>(inner: IColumnOf<'T>) =
             result.[j] <- inner.Row(startIdx + j)
         result
 
-    /// Append a row of values from an array.
-    member _.Append(values: 'T array) =
-        for v in values do inner.Append(v)
-        ensureOffsets (offsetsCount + 1)
-        offsets.[offsetsCount] <- uint64 inner.Rows
-        offsetsCount <- offsetsCount + 1
+    /// Zero-copy view of row i when `inner` is a bulk-readable primitive
+    /// (`ColPrimitive<'T>`) — returns a slice into the inner column's typed
+    /// buffer. For non-primitive inner (`ColStr`, `ColEnum*`, etc.) it
+    /// falls back to allocating `Row(i)` and returning a span over the
+    /// result — still correct, just no longer zero-alloc.
+    /// Lifetime: aliases inner's buffer, valid only until the next
+    /// `DecodeColumn` / `Reset` / `Append` on the inner column.
+    member this.RowSpan(i: int) : ReadOnlySpan<'T> =
+        let endIdx = int offsets.[i]
+        let startIdx = if i = 0 then 0 else int offsets.[i - 1]
+        let length = endIdx - startIdx
+        match box inner with
+        | :? IBulkReadable<'T> as bulk ->
+            bulk.AsSpan().Slice(startIdx, length)
+        | _ ->
+            ReadOnlySpan<'T>(this.Row(i))
 
-    /// Append a row of values from a span (zero-allocation entry).
+    /// Append a row of values from an array. Delegates to `AppendSpan` so
+    /// the bulk-copy dispatch is shared.
+    member this.Append(values: 'T array) =
+        this.AppendSpan(ReadOnlySpan(values))
+
+    /// Append a row of values from a span. When `inner` implements
+    /// `IBulkAppendable<'T>` (i.e. is a `ColPrimitive<'T>`), the values
+    /// are copied in one shot via `MemoryMarshal.Cast` — no per-element
+    /// `Append`. For non-primitive inner (`ColStr`, `ColEnum*`, etc.)
+    /// the per-row fallback runs.
     member _.AppendSpan(values: ReadOnlySpan<'T>) =
-        for i in 0 .. values.Length - 1 do
-            inner.Append(values.[i])
+        match box inner with
+        | :? IBulkAppendable<'T> as bulk -> bulk.AppendRange(values)
+        | _ ->
+            for i in 0 .. values.Length - 1 do
+                inner.Append(values.[i])
         ensureOffsets (offsetsCount + 1)
         offsets.[offsetsCount] <- uint64 inner.Rows
         offsetsCount <- offsetsCount + 1

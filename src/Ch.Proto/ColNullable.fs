@@ -36,6 +36,23 @@ type ColNullable<'T>(inner: IColumnOf<'T>) =
     /// the inner column's filler — usually 0 / "" — not meaningful.
     member _.Inner = inner
 
+    /// Typed view of the inner value buffer when `inner` is bulk-readable
+    /// (a `ColPrimitive<'T>`). At null rows the value is the inner's filler
+    /// (`Unchecked.defaultof<'T>`) — not meaningful. Combine with `NullsSpan`
+    /// to branchless-mask values. Lifetime: aliases inner's buffer.
+    /// Raises `NotSupportedException` for non-bulk inner (e.g. `ColStr`).
+    /// (Method, not property — and the match returns the interface, not
+    /// the span, because `raise : exn -> 'a` can't instantiate `'a` as a
+    /// byref-like `ReadOnlySpan<'T>`.)
+    member _.ValueSpan() : ReadOnlySpan<'T> =
+        let bulk : IBulkReadable<'T> =
+            match box inner with
+            | :? IBulkReadable<'T> as b -> b
+            | _ ->
+                raise (NotSupportedException
+                    $"ColNullable.ValueSpan requires bulk-readable inner; got {inner.GetType().Name}")
+        bulk.AsSpan()
+
     member _.Reset() =
         nullsCount <- 0
         inner.Reset()

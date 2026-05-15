@@ -74,4 +74,27 @@ let tests = testList "ColNullable" [
         Expect.equal col.Rows 0 "rows"
         Expect.equal col.NullsCount 0 "nulls"
         Expect.equal col.Inner.Rows 0 "inner"
+
+    testCase "ValueSpan + NullsSpan view inner values and mask (primitive inner)" <| fun _ ->
+        let col = ColNullable<int32>(ColInt32())
+        col.Append(ValueSome 42)
+        col.Append(ValueNone)
+        col.Append(ValueSome 100)
+        let values = col.ValueSpan()
+        let nulls = col.NullsSpan
+        Expect.equal values.Length 3 "values length"
+        Expect.equal nulls.Length 3 "nulls length"
+        Expect.equal values.[0] 42 "row 0 value"
+        Expect.equal nulls.[0] 0uy "row 0 not null"
+        Expect.equal nulls.[1] 1uy "row 1 null"
+        Expect.equal values.[2] 100 "row 2 value"
+
+    testCase "ValueSpan throws for non-bulk-readable inner" <| fun _ ->
+        let col = ColNullable<string>(ColStr())
+        col.Append(ValueSome "x")
+        // Access .Length to consume the ref-struct return without piping
+        // through the polymorphic `ignore` (can't instantiate over a byref).
+        Expect.throwsT<NotSupportedException>
+            (fun () -> col.ValueSpan().Length |> ignore)
+            "non-primitive inner"
 ]
