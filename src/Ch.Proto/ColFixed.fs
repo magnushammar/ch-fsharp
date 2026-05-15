@@ -62,11 +62,55 @@ type ColFixedBytes(typeName: string, elemSize: int) =
         member this.DecodeColumn(r, n) = this.DecodeColumn(r, n)
         member this.EncodeColumn(b) = this.EncodeColumn(b)
 
+    interface IRowBytes with
+        member this.RowBytes(i) = this.RowSpan(i)
+
 
 /// `FixedString(N)` — exactly N bytes per row, no length prefix on the wire.
+///
+/// Typed access via `IColumnOf<byte[]>` — `Append(byte[])` copies N bytes
+/// into the column buffer; `Row(i): byte[]` allocates a fresh N-byte
+/// array. Use the inherited `AppendBytes` / `RowSpan` for zero-alloc
+/// byte access.
+///
+/// Implements the composite facets (`IArrayable` / `INullable` /
+/// `ILowCardinality`) so `ColAuto.build` can wrap it in `Array(...)` /
+/// `Nullable(...)` / `LowCardinality(...)` recursively. The
+/// `LowCardinality(FixedString(N))` path passes
+/// `ByteArrayContentEqualityComparer.Instance` for content-based dedup
+/// (default array equality is reference-based — useless here).
 [<Sealed>]
 type ColFixedStr(size: int) =
     inherit ColFixedBytes(sprintf "FixedString(%d)" size, size)
+
+    /// Allocating typed read — copies N bytes into a fresh `byte[]`.
+    /// Use `RowSpan(i)` for zero-alloc byte access; this typed path
+    /// exists so `ColLowCardinality<byte[]>` and `ColAuto`'s facet
+    /// dispatch have a `'T`-shaped surface to talk to.
+    member this.Row(i: int) : byte array =
+        this.RowSpan(i).ToArray()
+
+    /// Typed append by copy — must be exactly `size` bytes.
+    member this.Append(v: byte array) =
+        this.AppendBytes(System.ReadOnlySpan(v))
+
+    interface IColumnOf<byte array> with
+        member this.Append(v) = this.Append(v)
+        member this.Row(i) = this.Row(i)
+
+    interface IArrayable with
+        member this.Array() =
+            ColArr<byte array>(this :> IColumnOf<byte array>) :> IColumnResult
+
+    interface INullable with
+        member this.Nullable() =
+            ColNullable<byte array>(this :> IColumnOf<byte array>) :> IColumnResult
+
+    interface ILowCardinality with
+        member this.LowCardinality() =
+            ColLowCardinality<byte array>(
+                this :> IColumnOf<byte array>,
+                ByteArrayContentEqualityComparer.Instance) :> IColumnResult
 
 
 /// `UUID` — 16 bytes per row. ClickHouse stores UUIDs as two big-endian

@@ -72,6 +72,52 @@ let tests = testList "ColFixed" [
             (fun () -> col.AppendBytes(ReadOnlySpan([| 1uy; 2uy; 3uy |])))
             "size mismatch"
 
+    testCase "ColFixedStr typed Append(byte[]) / Row(i): byte[] round-trips" <| fun _ ->
+        let col = ColFixedStr(4)
+        col.Append([| 0x01uy; 0x02uy; 0x03uy; 0x04uy |])
+        col.Append([| 0x11uy; 0x12uy; 0x13uy; 0x14uy |])
+        Expect.equal (col.Row(0)) [| 0x01uy; 0x02uy; 0x03uy; 0x04uy |] "row 0"
+        Expect.equal (col.Row(1)) [| 0x11uy; 0x12uy; 0x13uy; 0x14uy |] "row 1"
+
+    testCase "ColLowCardinality<byte[]>(ColFixedStr(8)) dedup roundtrip" <| fun _ ->
+        let inner = ColFixedStr(8)
+        let lc =
+            ColLowCardinality<byte array>(
+                inner,
+                ByteArrayContentEqualityComparer.Instance)
+        let v1 : byte[] = Array.replicate 8 0xAAuy
+        let v2 : byte[] = Array.replicate 8 0xBBuy
+        let v1Dup : byte[] = Array.replicate 8 0xAAuy   // fresh array, same content
+        lc.Append(v1)
+        lc.Append(v2)
+        lc.Append(v1Dup)
+        Expect.equal lc.Inner.Rows 2 "content dedup: only 2 unique values"
+        Expect.equal lc.Rows 3 "3 rows total"
+        // Wire roundtrip: encode + decode and verify rows match.
+        lc.Prepare()
+        let stateBuf = Buf()
+        lc.EncodeState(stateBuf)
+        let bodyBuf = Buf()
+        lc.EncodeColumn(bodyBuf)
+
+        let dec =
+            ColLowCardinality<byte array>(
+                ColFixedStr(8),
+                ByteArrayContentEqualityComparer.Instance)
+        let stateMs = new MemoryStream(stateBuf.WrittenSpan.ToArray())
+        dec.DecodeState(Reader(stateMs))
+        let bodyMs = new MemoryStream(bodyBuf.WrittenSpan.ToArray())
+        dec.DecodeColumn(Reader(bodyMs), 3)
+
+        Expect.equal dec.Rows 3 "decoded rows"
+        Expect.equal dec.DictRows 2 "decoded dict rows"
+        // RowSpan path (no string materialisation, byte-direct).
+        Expect.equal (dec.RowSpan(0).ToArray()) v1 "decoded row 0 bytes"
+        Expect.equal (dec.RowSpan(1).ToArray()) v2 "decoded row 1 bytes"
+        Expect.isTrue
+            (dec.RowSpan(0).SequenceEqual(dec.RowSpan(2)))
+            "row 2 matches row 0 (dedup'd content)"
+
     testCase "ColIPv6 round-trips against col_ipv6 golden" <| fun _ ->
         let col = ColIPv6()
         for i in 0 .. 49 do

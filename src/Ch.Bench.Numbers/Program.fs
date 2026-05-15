@@ -100,6 +100,11 @@ let main argv =
             let iv = ColInterval()
             let js = ColJSONStr()
             let bf = ColBFloat16()
+            // LowCardinality(FixedString(N)) — exercises the new
+            // content-hash IEqualityComparer path on the receive side.
+            let lcfs = ColLowCardinality<byte array>(
+                            ColFixedStr(8),
+                            ByteArrayContentEqualityComparer.Instance)
             let onBlock (rows: int) =
                 for i in 0 .. rows - 1 do
                     let nuStr =
@@ -120,8 +125,15 @@ let main argv =
                     let ptStr = sprintf "(%g, %g)" p.X p.Y
                     let ivv = iv.Row(i)
                     let ivStr = sprintf "%d %A" ivv.Value ivv.Scale
-                    printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s | %g"
-                        (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i)) (bf.RowFloat(i))
+                    // RowSpan gives zero-alloc byte access into the LC dict.
+                    let lcfsHex =
+                        let bytes = lcfs.RowSpan(i)
+                        let sb = System.Text.StringBuilder(bytes.Length * 2)
+                        for j in 0 .. bytes.Length - 1 do
+                            sb.Append(sprintf "%02x" bytes.[j]) |> ignore
+                        sb.ToString()
+                    printfn "%d | %s | %s | %s | [%s] | {%s} | %s | %s | %s | %s | %s | %s | %g | %s"
+                        (n32.Row(i)) (s.Row(i)) (lc.Row(i)) nuStr arStr mpStr tpStr2 decStr (en.Row(i)) ptStr ivStr (js.Row(i)) (bf.RowFloat(i)) lcfsHex
 
             let q = { SelectQuery.defaults with
                         Body =
@@ -137,7 +149,8 @@ let main argv =
                             "(toFloat64(number), toFloat64(number * number))::Point AS pt, " +
                             "(INTERVAL toInt64(number) DAY) AS iv, " +
                             "CAST(concat('{\"n\":', toString(number), '}') AS JSON) AS js, " +
-                            "toBFloat16(number * 0.5) AS bf " +
+                            "toBFloat16(number * 0.5) AS bf, " +
+                            "CAST(toFixedString(toString(number % 3), 8) AS LowCardinality(FixedString(8))) AS lcfs " +
                             "FROM system.numbers_mt LIMIT 6"
                         Results = [
                             { Name = "n32"; Column = n32 }
@@ -153,6 +166,7 @@ let main argv =
                             { Name = "iv";  Column = iv  }
                             { Name = "js";  Column = js  }
                             { Name = "bf";  Column = bf  }
+                            { Name = "lcfs"; Column = lcfs }
                         ]
                         OnBlock = onBlock
                         Settings = [
