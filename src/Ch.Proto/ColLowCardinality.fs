@@ -22,8 +22,20 @@ open System.IO
 /// We DEPART from ch-go on read: we materialise the dictionary as a
 /// `'T[] dictArray` of size dictRows (not a dense `Values []T` of size
 /// rowCount). See plans/DESIGN_CHOICES.md §8.
+///
+/// Append-time dedup: the dictionary is built inline as values arrive
+/// (`Append` → `dedup.TryGetValue` → either reuse key or push to inner
+/// + record new key). `Prepare` then just packs the key indices into
+/// the configured byte width. Saves the staged-values buffer
+/// (`ResizeArray<'T>`) and one extra pass at encode time.
+///
+/// Optional `keyComparer` overrides the default `EqualityComparer<'T>`
+/// — required for `byte[]` keys (content-hash via
+/// `ByteArrayContentEqualityComparer`) because default array equality
+/// is reference-based.
 [<Sealed>]
-type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf<'T>) =
+type ColLowCardinality<'T when 'T : equality and 'T : not null>
+    (inner: IColumnOf<'T>, ?keyComparer: IEqualityComparer<'T>) =
 
     // Wire-side bit flags from ch-go's compress/clickhouse-cpp lineage.
     static let updateAllFlags = (1L <<< 9) ||| (1L <<< 10)  // hasAdditionalKeys | needUpdateDict
@@ -35,11 +47,20 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
     let mutable rowCount : int = 0
     let mutable dictArray : 'T array = Array.Empty<'T>()
     let mutable dictRows : int = 0
+    /// Lazy flag — dictArray is populated via `inner.Row(k)` only when
+    /// `Row(i)` / `Dictionary` is first called after a `DecodeColumn`.
+    /// Byte-span consumers (`RowSpan`) bypass this entirely and skip the
+    /// per-block string/value allocations.
+    let mutable dictMaterialized : bool = false
 
-    // Write-side state — allocated eagerly. Cheap, and the read-only case
-    // pays one unused ResizeArray + Dictionary per column instance.
-    let values = ResizeArray<'T>()
-    let dedup = Dictionary<'T, int>()
+    // Write-side state — allocated eagerly. dedup grows as Append sees
+    // new values; tempKeys collects one int per Append. Both reset at
+    // block boundaries via Reset().
+    let dedup : Dictionary<'T, int> =
+        match keyComparer with
+        | Some c -> Dictionary<'T, int>(c)
+        | None -> Dictionary<'T, int>()
+    let tempKeys = ResizeArray<int>()
 
     let ensureKeys (n: int) =
         if keys.Length < n then
@@ -48,6 +69,12 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
     let ensureDict (n: int) =
         if dictArray.Length < n then
             dictArray <- Array.zeroCreate (max n (max 16 (dictArray.Length * 2)))
+
+    let ensureDictMaterialized () =
+        if not dictMaterialized then
+            for k in 0 .. dictRows - 1 do
+                dictArray.[k] <- inner.Row(k)
+            dictMaterialized <- true
 
     let widthForCardinality (n: int) : int * int =
         // (keyWidth, keyTypeNibble)
@@ -73,26 +100,22 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
         | 8 -> BinaryPrimitives.WriteUInt64LittleEndian(keys.AsSpan(off, 8), uint64 idx)
         | other -> raise (InvalidOperationException $"bad keyWidth {other}")
 
-    /// Walk Values, build inner column + key indices, pick key width.
+    /// Pick key width based on inline-built dict size and pack the
+    /// staged key indices into the keys byte buffer. The dedup +
+    /// inner.Append happen during `Append` (eagerly), so here we
+    /// only do the keyWidth-dependent byte packing.
     /// Called automatically before EncodeColumn — exposed for tests.
     member _.Prepare() =
-        if values.Count = 0 then
+        if tempKeys.Count = 0 then
             rowCount <- 0
         else
-            dedup.Clear()
-            inner.Reset()
-            for v in values do
-                if not (dedup.ContainsKey v) then
-                    dedup.[v] <- inner.Rows
-                    inner.Append(v)
-            // Now pick key width based on dict size.
             let kw, _ = widthForCardinality inner.Rows
             keyWidth <- kw
-            rowCount <- values.Count
+            rowCount <- tempKeys.Count
             ensureKeys (rowCount * keyWidth)
             let mutable off = 0
-            for v in values do
-                writeKeyAt off (dedup.[v])
+            for k in tempKeys do
+                writeKeyAt off k
                 off <- off + keyWidth
             dictRows <- inner.Rows
 
@@ -105,12 +128,12 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
     /// runs**, otherwise `Client.fs: EncodeDataBlock` writes a block
     /// header with rows=0 and the server silently accepts the empty
     /// block (no exception, complete data loss). Returning
-    /// `max values.Count rowCount` covers both sides:
-    ///   - write side: `values.Count` is bumped on every Append.
-    ///   - read side: `rowCount` is set in DecodeColumn; values is unused
-    ///     because we materialise the dictionary, not a dense `Values`
-    ///     list (DESIGN_CHOICES §8).
-    member _.Rows = max values.Count rowCount
+    /// `max tempKeys.Count rowCount` covers both sides:
+    ///   - write side: `tempKeys.Count` is bumped on every `Append`.
+    ///   - read side: `rowCount` is set in `DecodeColumn`; `tempKeys`
+    ///     is unused because we materialise the dictionary, not a
+    ///     dense `Values` list (DESIGN_CHOICES §8).
+    member _.Rows = max tempKeys.Count rowCount
 
     /// Exposed for perf-sensitive consumers: iterate Keys + Inner directly to
     /// avoid Row(i)'s per-row branch on keyWidth.
@@ -120,20 +143,58 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
     member _.DictRows = dictRows
     /// Materialised dictionary entries: dictArray[k] = inner.Row(k) for
     /// k in 0..DictRows-1. Lifetime is until next DecodeColumn.
-    member _.Dictionary : ReadOnlySpan<'T> = ReadOnlySpan(dictArray, 0, dictRows)
+    /// Materialisation is lazy — the first `Dictionary` / `Row(i)` call
+    /// after `DecodeColumn` populates the array; byte-span consumers
+    /// using `RowSpan(i)` skip materialisation entirely.
+    member _.Dictionary : ReadOnlySpan<'T> =
+        ensureDictMaterialized ()
+        ReadOnlySpan(dictArray, 0, dictRows)
 
     member _.Reset() =
         rowCount <- 0
         dictRows <- 0
-        values.Clear()
+        dictMaterialized <- false
+        dedup.Clear()
+        tempKeys.Clear()
         inner.Reset()
 
-    /// Append a value (write-side). Dedup happens in Prepare() before encode.
-    member _.Append(v: 'T) = values.Add(v)
+    /// Append a value (write-side). Dedup happens inline: existing values
+    /// hit the dedup dictionary and reuse the key; new values are pushed
+    /// to `inner` and registered. `Prepare` then only has to pick the
+    /// key byte width and pack `tempKeys`.
+    member _.Append(v: 'T) =
+        let mutable idx = 0
+        if dedup.TryGetValue(v, &idx) then
+            tempKeys.Add(idx)
+        else
+            idx <- inner.Rows
+            dedup.[v] <- idx
+            inner.Append(v)
+            tempKeys.Add(idx)
 
-    /// Row i — fast path: dictArray indexed by readKeyAt(i).
+    /// Row i — fast path: dictArray indexed by readKeyAt(i). The dict
+    /// is materialised lazily on the first `Row` / `Dictionary` call
+    /// after each `DecodeColumn`; subsequent calls hit the cached array
+    /// (the materialised branch becomes the predicted path).
     member _.Row(i: int) : 'T =
+        ensureDictMaterialized ()
         dictArray.[readKeyAt i]
+
+    /// Zero-allocation byte view of row i — supported when `inner` is a
+    /// byte-row column (`ColStr`, `ColFixedStr`). Skips `dictArray`
+    /// materialisation entirely. Caller decodes UTF-8 / converts only
+    /// if they need a managed `'T`. Lifetime: aliases inner's bytes,
+    /// valid only until next `DecodeColumn` / `Reset` on the inner.
+    /// Raises `NotSupportedException` if `inner` doesn't implement
+    /// `IRowBytes`.
+    member _.RowSpan(i: int) : ReadOnlySpan<byte> =
+        let bytes : IRowBytes =
+            match box inner with
+            | :? IRowBytes as b -> b
+            | _ ->
+                raise (NotSupportedException
+                    $"ColLowCardinality.RowSpan requires byte-row inner (ColStr / ColFixedStr); got {inner.GetType().Name}")
+        bytes.RowBytes(readKeyAt i)
 
     member this.DecodeColumn(r: Reader, n: int) =
         if n = 0 then
@@ -161,9 +222,9 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>(inner: IColumnOf
             inner.DecodeColumn(r, dRows)
             dictRows <- dRows
             ensureDict dRows
-            // Materialise the dict ONCE per block — see DESIGN_CHOICES §8.
-            for k in 0 .. dRows - 1 do
-                dictArray.[k] <- inner.Row(k)
+            // Dict is materialised lazily on first `Row(i)` / `Dictionary` —
+            // byte-span consumers using `RowSpan(i)` skip it entirely.
+            dictMaterialized <- false
 
             let kRows = int (r.Int64())
             if kRows <> n then

@@ -113,4 +113,61 @@ let tests = testList "ColLowCardinality" [
         Expect.throwsT<InvalidDataException>
             (fun () -> lc.DecodeState(Reader(ms)))
             "bad version"
+
+    testCase "Append deduplicates eagerly into inner" <| fun _ ->
+        // Post-refactor: dedup happens at Append time, not Prepare time.
+        // The inner column should reflect the dict size immediately.
+        let col = ColLowCardinality<string>(ColStr())
+        col.Append("a")
+        col.Append("b")
+        col.Append("a")   // dup → reuses key
+        col.Append("c")
+        col.Append("b")   // dup → reuses key
+        Expect.equal col.Inner.Rows 3 "inner holds {a, b, c} after Append"
+        Expect.equal col.Rows 5 "5 rows total"
+
+    testCase "Append + Prepare picks the right keyWidth" <| fun _ ->
+        let col = ColLowCardinality<int32>(ColInt32())
+        for i in 0 .. 9 do
+            col.Append(i)
+        col.Prepare()
+        Expect.equal col.Inner.Rows 10 "10 unique values"
+        Expect.equal col.KeyWidth 1 "≤256 → 1-byte keys"
+
+    testCase "RowSpan returns inner UTF-8 bytes for LowCardinality(String)" <| fun _ ->
+        // Roundtrip a few values, then read back via RowSpan and verify
+        // byte equality without going through Row(i) (which would have
+        // materialised the string dict).
+        let lc = ColLowCardinality<string>(ColStr())
+        lc.Append("alpha")
+        lc.Append("beta")
+        lc.Append("alpha")   // dup
+        lc.Prepare()
+        let buf = Buf()
+        lc.EncodeColumn(buf)
+        let dec = ColLowCardinality<string>(ColStr())
+        let ms = new MemoryStream(buf.WrittenSpan.ToArray())
+        dec.DecodeColumn(Reader(ms), 3)
+
+        let bytes0 = dec.RowSpan(0)
+        let bytes1 = dec.RowSpan(1)
+        let bytes2 = dec.RowSpan(2)
+        Expect.equal bytes0.Length 5 "alpha is 5 bytes"
+        Expect.equal bytes1.Length 4 "beta is 4 bytes"
+        Expect.equal bytes0.[0] (byte 'a') "alpha[0]"
+        Expect.equal bytes1.[0] (byte 'b') "beta[0]"
+        Expect.isTrue (bytes0.SequenceEqual(bytes2)) "dup row matches first"
+
+    testCase "RowSpan throws when inner isn't byte-row" <| fun _ ->
+        let lc = ColLowCardinality<int32>(ColInt32())
+        lc.Append(42)
+        lc.Prepare()
+        let buf = Buf()
+        lc.EncodeColumn(buf)
+        let dec = ColLowCardinality<int32>(ColInt32())
+        let ms = new MemoryStream(buf.WrittenSpan.ToArray())
+        dec.DecodeColumn(Reader(ms), 1)
+        Expect.throwsT<NotSupportedException>
+            (fun () -> dec.RowSpan(0).Length |> ignore)
+            "ColInt32 inner doesn't implement IRowBytes"
 ]
