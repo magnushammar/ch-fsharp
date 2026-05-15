@@ -164,6 +164,23 @@ let tests = testList "ColAuto" [
         | :? ColMap<string, int32 array> -> ()
         | other -> failtestf "expected ColMap<string, int32[]>, got %A" (other.GetType())
 
+    testCase "Map parser tolerates parens inside quoted Enum names" <| fun _ ->
+        // The quoted `(` would otherwise unbalance the splitter's depth
+        // counter and cause it to miss the K|V top-level comma. With
+        // quote tracking, depth stays correct.
+        // (NB: commas inside quoted enum names remain unsupported — the
+        // downstream `ColEnum.Infer` splits its body on `,` without
+        // quote tracking. That's a separate parser, not in scope here.)
+        match ColAuto.build "Map(Enum8('(' = 1), String)" with
+        | :? ColMap<string, string> -> ()
+        | other -> failtestf "got %A" (other.GetType())
+
+    testCase "Tuple parser tolerates parens inside quoted Enum names" <| fun _ ->
+        match ColAuto.build "Tuple(Enum8('(' = 1), Int32)" with
+        | :? ColTuple as t ->
+            Expect.equal t.Type "Tuple(Enum8('(' = 1), Int32)" "type round-trips"
+        | other -> failtestf "got %A" (other.GetType())
+
     testCase "build Array(Array(Int32)) recursive — ColArr<int32 array>" <| fun _ ->
         match ColAuto.build "Array(Array(Int32))" with
         | :? ColArr<int32 array> -> ()

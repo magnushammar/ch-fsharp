@@ -82,42 +82,44 @@ type ColAuto() =
         let peelOuter (prefix: string) (s: string) =
             s.Substring(prefix.Length + 1, s.Length - prefix.Length - 2)
 
-        // Split "Tuple(T1, T2, Tuple(T3, T4), ...)" on top-level commas only —
-        // commas inside nested composites are not separators.
-        let parseTupleInners (s: string) : string list =
-            let body = s.Substring(6, s.Length - 7)  // strip "Tuple(" and ")"
+        // Split a composite body on top-level commas, ignoring commas
+        // inside nested parens AND inside single-quoted strings. The
+        // latter matters for `Enum8('a,b' = 1, 'c' = 2)` and similar —
+        // ClickHouse enum value names can contain `,` `(` `)`. Quote
+        // toggling on `'`; escape sequences inside quotes are out of
+        // scope (no real type string we've seen uses them).
+        let splitOnTopLevelCommas (body: string) : string list =
             let acc = ResizeArray<string>()
             let mutable startIdx = 0
             let mutable depth = 0
+            let mutable inQuote = false
             for i in 0 .. body.Length - 1 do
-                match body.[i] with
-                | '(' -> depth <- depth + 1
-                | ')' -> depth <- depth - 1
-                | ',' when depth = 0 ->
-                    acc.Add(body.Substring(startIdx, i - startIdx).Trim())
-                    startIdx <- i + 1
-                | _ -> ()
+                let c = body.[i]
+                if inQuote then
+                    if c = '\'' then inQuote <- false
+                else
+                    match c with
+                    | '\'' -> inQuote <- true
+                    | '(' -> depth <- depth + 1
+                    | ')' -> depth <- depth - 1
+                    | ',' when depth = 0 ->
+                        acc.Add(body.Substring(startIdx, i - startIdx).Trim())
+                        startIdx <- i + 1
+                    | _ -> ()
             acc.Add(body.Substring(startIdx).Trim())
             List.ofSeq acc
 
-        // Split "Map(K, V)" on the top-level comma. K or V may themselves be
-        // composites containing nested commas.
+        // Split "Tuple(T1, T2, Tuple(T3, T4), ...)" on top-level commas.
+        let parseTupleInners (s: string) : string list =
+            splitOnTopLevelCommas (s.Substring(6, s.Length - 7))
+
+        // Split "Map(K, V)" — expect exactly two top-level segments.
         let parseMapInners (s: string) : string * string =
-            let body = s.Substring(4, s.Length - 5)  // strip "Map(" and ")"
-            let mutable depth = 0
-            let mutable splitAt = -1
-            let mutable i = 0
-            while i < body.Length && splitAt < 0 do
-                match body.[i] with
-                | '(' -> depth <- depth + 1
-                | ')' -> depth <- depth - 1
-                | ',' when depth = 0 -> splitAt <- i
-                | _ -> ()
-                i <- i + 1
-            if splitAt < 0 then
-                raise (NotSupportedException $"ColAuto: malformed Map type '{s}'")
-            body.Substring(0, splitAt).Trim(),
-            body.Substring(splitAt + 1).Trim()
+            match splitOnTopLevelCommas (s.Substring(4, s.Length - 5)) with
+            | [k; v] -> k, v
+            | parts ->
+                raise (NotSupportedException
+                    $"ColAuto: malformed Map type '{s}' — expected exactly 2 top-level segments, got {parts.Length}")
 
         // Discover the typed inner of a column by walking its IColumnOf<'X>
         // interface impl. Returns 'X so we can MakeGenericType ColMap<K,V>.
