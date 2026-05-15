@@ -76,9 +76,10 @@ type ColFixedBytes(typeName: string, elemSize: int) =
 /// Implements the composite facets (`IArrayable` / `INullable` /
 /// `ILowCardinality`) so `ColAuto.build` can wrap it in `Array(...)` /
 /// `Nullable(...)` / `LowCardinality(...)` recursively. The
-/// `LowCardinality(FixedString(N))` path passes
-/// `ByteArrayContentEqualityComparer.Instance` for content-based dedup
-/// (default array equality is reference-based — useless here).
+/// `LowCardinality(FixedString(N))` path relies on
+/// `ColLowCardinality<byte[]>`'s built-in auto-default to
+/// `ByteArrayContentEqualityComparer` (default array equality is
+/// reference-based — useless for content dedup).
 [<Sealed>]
 type ColFixedStr(size: int) =
     inherit ColFixedBytes(sprintf "FixedString(%d)" size, size)
@@ -108,9 +109,9 @@ type ColFixedStr(size: int) =
 
     interface ILowCardinality with
         member this.LowCardinality() =
-            ColLowCardinality<byte array>(
-                this :> IColumnOf<byte array>,
-                ByteArrayContentEqualityComparer.Instance) :> IColumnResult
+            // ColLowCardinality<byte[]> auto-defaults to the content-
+            // hash comparer; no need to pass it explicitly.
+            ColLowCardinality<byte array>(this :> IColumnOf<byte array>) :> IColumnResult
 
 
 /// `UUID` — 16 bytes per row. ClickHouse stores UUIDs as two big-endian

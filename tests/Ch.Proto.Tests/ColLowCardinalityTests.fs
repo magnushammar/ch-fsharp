@@ -66,8 +66,8 @@ let tests = testList "ColLowCardinality" [
         Expect.equal dec.DictRows 1 "dict rows"
         Expect.equal dec.Rows 10 "rows"
         Expect.equal dec.KeyWidth 1 "key width"
-        Expect.equal dec.Dictionary.[0] "only-one" "dict entry"
-        for k in dec.Keys.ToArray() do Expect.equal k 0uy "key byte"
+        Expect.equal (dec.Dictionary().[0]) "only-one" "dict entry"
+        for k in dec.Keys().ToArray() do Expect.equal k 0uy "key byte"
 
     testCase "<string> empty column encodes to empty bytes" <| fun _ ->
         let lc = ColLowCardinality<string>(ColStr())
@@ -170,4 +170,31 @@ let tests = testList "ColLowCardinality" [
         Expect.throwsT<NotSupportedException>
             (fun () -> dec.RowSpan(0).Length |> ignore)
             "ColInt32 inner doesn't implement IRowBytes"
+
+    testCase "ColLowCardinality<byte[]> auto-defaults to content-hash dedup" <| fun _ ->
+        // No explicit comparer passed. Default array equality is
+        // reference-based, so without the auto-default these two fresh
+        // arrays with identical content would each take a dict slot.
+        // With the auto-default, content dedup kicks in.
+        let lc = ColLowCardinality<byte array>(ColFixedStr(8))
+        let v = Array.replicate 8 0xAAuy
+        let vDup = Array.replicate 8 0xAAuy   // fresh array, same content
+        lc.Append(v)
+        lc.Append(vDup)
+        Expect.equal lc.Inner.Rows 1 "content dedup: only 1 unique value"
+        Expect.equal lc.Rows 2 "2 rows total"
+
+    testCase "ColLowCardinality<byte[]> explicit reference comparer still works" <| fun _ ->
+        // The auto-default is just a default — explicit comparer wins.
+        // Use HashIdentity.Reference to opt back into reference equality
+        // (rarely useful, but the override path must work).
+        let lc =
+            ColLowCardinality<byte array>(
+                ColFixedStr(8),
+                HashIdentity.Reference)
+        let v = Array.replicate 8 0xAAuy
+        let vDup = Array.replicate 8 0xAAuy
+        lc.Append(v)
+        lc.Append(vDup)
+        Expect.equal lc.Inner.Rows 2 "reference dedup: distinct arrays = distinct keys"
 ]

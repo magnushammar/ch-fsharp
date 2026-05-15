@@ -56,9 +56,26 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>
     // Write-side state — allocated eagerly. dedup grows as Append sees
     // new values; tempKeys collects one int per Append. Both reset at
     // block boundaries via Reset().
+    //
+    // Comparer selection:
+    //   * caller's `keyComparer` wins if supplied;
+    //   * otherwise, for `'T = byte[]` we auto-supply
+    //     `ByteArrayContentEqualityComparer.Instance` because default
+    //     array equality is reference-based — using it would silently
+    //     break dedup on `LowCardinality(FixedString(N))`. This is the
+    //     "we know exactly one safe default for this 'T" case;
+    //     callers who really want reference equality on byte[] can
+    //     pass `HashIdentity.Reference` (or similar) explicitly.
+    //   * otherwise, `Dictionary<'T, int>()` picks
+    //     `EqualityComparer<'T>.Default`, which is content-correct for
+    //     primitives and `string`.
     let dedup : Dictionary<'T, int> =
         match keyComparer with
         | Some c -> Dictionary<'T, int>(c)
+        | None when typeof<'T> = typeof<byte array> ->
+            match box ByteArrayContentEqualityComparer.Instance with
+            | :? IEqualityComparer<'T> as ic -> Dictionary<'T, int>(ic)
+            | _ -> Dictionary<'T, int>()  // unreachable: typeof check passed
         | None -> Dictionary<'T, int>()
     let tempKeys = ResizeArray<int>()
 
@@ -136,17 +153,19 @@ type ColLowCardinality<'T when 'T : equality and 'T : not null>
     member _.Rows = max tempKeys.Count rowCount
 
     /// Exposed for perf-sensitive consumers: iterate Keys + Inner directly to
-    /// avoid Row(i)'s per-row branch on keyWidth.
+    /// avoid Row(i)'s per-row branch on keyWidth. Method (not property)
+    /// for surface consistency with the other span accessors.
     member _.Inner = inner
-    member _.Keys : ReadOnlySpan<byte> = ReadOnlySpan(keys, 0, rowCount * keyWidth)
+    member _.Keys() : ReadOnlySpan<byte> = ReadOnlySpan(keys, 0, rowCount * keyWidth)
     member _.KeyWidth = keyWidth
     member _.DictRows = dictRows
-    /// Materialised dictionary entries: dictArray[k] = inner.Row(k) for
-    /// k in 0..DictRows-1. Lifetime is until next DecodeColumn.
-    /// Materialisation is lazy — the first `Dictionary` / `Row(i)` call
-    /// after `DecodeColumn` populates the array; byte-span consumers
-    /// using `RowSpan(i)` skip materialisation entirely.
-    member _.Dictionary : ReadOnlySpan<'T> =
+    /// Materialised dictionary entries: `Dictionary().[k] = inner.Row(k)`
+    /// for k in 0..DictRows-1. Materialisation is lazy — the first
+    /// `Dictionary` / `Row(i)` call after `DecodeColumn` populates the
+    /// array; byte-span consumers using `RowSpan(i)` skip materialisation
+    /// entirely. Method (not property) for surface consistency.
+    /// Lifetime: valid until next `DecodeColumn` / `Reset`.
+    member _.Dictionary() : ReadOnlySpan<'T> =
         ensureDictMaterialized ()
         ReadOnlySpan(dictArray, 0, dictRows)
 
