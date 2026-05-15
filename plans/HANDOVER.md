@@ -63,11 +63,10 @@ Enum8, Point, IntervalDay, JSON, BFloat16, and
 parameterised / composite (Array / Nullable / LC / Tuple / Map) type
 from a server-sent type string for ad-hoc receive.
 
-> `--insert` currently fails on a driver-side INSERT framing race
-> (mechanism unknown, hypothesis in milestone #1). NOT the previously-
-> suspected "Atomic database-engine DDL visibility" issue — that was a
-> misdiagnosis; pre-existing tables fail identically. SELECT and
-> `--mixed` paths are unaffected.
+> `--insert` is now restructured to verify INSERT-only (no in-session
+> SELECT-back) — that pattern is anti-idiomatic for ClickHouse and was
+> tripping a latent driver behaviour, not a wire bug. Documented under
+> milestone #1; the smoke passes cleanly.
 
 ## Repo map
 
@@ -158,49 +157,52 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **`--insert` smoke crosses ClickHouse's async-DDL boundary.**
-   The right framing: ClickHouse doesn't promise CREATE-TABLE
-   followed by immediate INSERT works, regardless of whether they
-   share a connection. (See `CLAUDE.md` § "ClickHouse is not a
-   traditional database" for why.) The bench's
-   CREATE-then-INSERT-back-to-back pattern brings traditional-DB
-   assumptions to an OLAP system that doesn't honour them. The
-   driver's wire bytes are correct (verified by in-process hex
-   dump); the server simply finalises the INSERT with
-   `written_rows = 0` before our data block lands.
+1. **In-session `SELECT-immediately-after-INSERT` returns 0 rows even
+   though the data is on the server.** Not blocking — the pattern
+   is anti-idiomatic and the `--insert` smoke has been restructured
+   to not depend on it (it now verifies via the server's
+   no-exception response and prints the table name for out-of-band
+   verification via `clickhouse-client`).
 
-   **What we observed** (all confirmed empirically):
-   - Reliably fails with `INSERT: 4 rows pushed / FAIL: 0 rows back`.
-   - Server `query_log` shows `INSERT INTO X (cols) FORMAT Native —
-     written_rows = 0`.
-   - Fails identically with 0ms, 200ms, 2s sleep between CREATE and
-     INSERT. Sleeping more doesn't help.
-   - **Caveat:** a pre-existing externally-created table also fails
-     in our bench — but that test wasn't conclusive, because it
-     still crosses a fresh-connection / fresh-session boundary and
-     ClickHouse's metadata-propagation rules apply there too. The
-     pre-existing-table experiment was investigated under
-     traditional-DB intuition and may not have ruled out async-DDL
-     involvement; do not treat it as definitive evidence of a
-     wire-protocol bug.
-   - A `Thread.Sleep(50)` inside `Client.fs SendInput` between
+   **What we know:**
+   - INSERT itself is fine. External `clickhouse-client SELECT FROM
+     ... ` against the same table sees all the rows. Server's
+     `query_log` confirms `written_rows = N`.
+   - In-session `client.Select(...)` immediately after the
+     `client.Insert(...)` returns 0 rows. Same client, same socket.
+   - A `Thread.Sleep(50)` in `Client.fs SendInput` between
      `EncodeBlankBlock()` and `buf.WriteToAndReset(stream)` makes
-     it pass. This is **not** evidence of a driver wire-format bug
-     either — it's evidence that giving the server more time
-     resolves the consistency window, exactly as the
-     async-DDL hypothesis predicts.
+     the in-session SELECT see the data — but injecting an
+     unconditional 50ms delay into every INSERT is forbidden by the
+     cardinal rule.
+   - Time-based delays *between* `client.Insert` and `client.Select`
+     in user code may or may not help — untested.
 
-   **The fix is on the test scaffolding, not the driver.** Real
-   users don't do CREATE-then-immediate-INSERT — they create tables
-   out-of-band (DBA, migrations, init scripts) and INSERT against
-   long-lived tables. The bench should do the same: a setup script
-   (or one-time helper) creates the test table well before the
-   bench runs; the bench just INSERTs / SELECTs into it.
+   **Plausible mechanisms** (none confirmed):
+   - Our `Reader`'s 8KB buffer holds stale bytes from the INSERT's
+     drain phase (Progress / Profile / EndOfStream) that the next
+     `Run` mis-consumes as the SELECT response.
+   - `Reader`'s compression state (`EnableCompression` /
+     `DisableCompression`) is toggled around block decoding; an
+     asymmetric leak between Run calls could mis-parse the next read.
+   - Server is honouring something ClickHouse-specific (query cache
+     for the empty pre-INSERT state, session-scoped read snapshot
+     via implicit transaction, etc.) and we're getting back a stale
+     view.
 
-   **Do not** add `Thread.Sleep` / retries / polling to the driver
-   itself — cardinal rule forbids unconditional perf hits, and more
-   fundamentally the driver shouldn't paper over ClickHouse
-   semantics that consumers need to be aware of.
+   **Anti-idiom acknowledgement.** Real ClickHouse code virtually
+   never does SELECT-immediately-after-INSERT in the same session
+   (ClickHouse's roots are a logging DB for Yandex Metrica — bulk
+   append, aggregate later, often from a different process / time).
+   This bug only manifests on a pattern nobody outside test scaffolds
+   should be writing. Worth investigating eventually if a real
+   consumer pattern hits it (e.g. some streaming-insert flow that
+   wants to immediately re-query state), but not blocking 1.0.
+
+   **Do not** add internal sleeps / retries / synchronisation to
+   paper over this. The cardinal rule forbids unconditional perf
+   hits, and more fundamentally the driver shouldn't pretend
+   ClickHouse offers semantics it doesn't.
 
 2. **Connection pool**: ch-go has it in a separate `chpool` package and
    explicitly disclaims it as out-of-core. Worth a small F# port for

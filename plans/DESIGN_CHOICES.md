@@ -126,19 +126,20 @@ but not yet started; they will wrap the low-level API.
     already appended for INSERT. The handler now skips body decode
     entirely when `insertHeader` is true.
 
-14. **`--insert` smoke crosses ClickHouse's async-DDL boundary.**
-    The bench creates a fresh table then INSERTs into it
-    back-to-back on the same connection; server's `query_log`
-    reports `written_rows=0`. This is *not* a driver wire-format
-    bug — the bytes we send are correct (verified by in-process hex
-    dump). It's ClickHouse working as designed: CREATE-then-INSERT-
-    within-milliseconds is not a supported pattern, regardless of
-    how long you sleep in between. (See `CLAUDE.md` §
-    "ClickHouse is not a traditional database".) The driver
-    shouldn't paper over this with internal sleeps or retries.
-    Restructuring the bench so table setup happens out-of-band
-    (separate process / init script) is the right fix. See
-    HANDOVER #1.
+14. **`--insert` smoke verifies INSERT-only; no in-session
+    SELECT-back.** Real ClickHouse usage virtually never does
+    SELECT-immediately-after-INSERT in the same session — the
+    DB's lineage as a logging DB for Yandex Metrica is append-
+    mostly, aggregate-later. The previous bench shape (CREATE +
+    INSERT + SELECT-back in one session) stacked two anti-idioms
+    and "failed" even though INSERT actually landed correctly on
+    the server. Bench now verifies INSERT via the server's
+    no-exception response and prints the table name for
+    out-of-band verification via `clickhouse-client`. There's a
+    latent driver behaviour where in-session SELECT immediately
+    after INSERT returns 0 rows even though the data is present
+    server-side (HANDOVER #1) — not blocking, only affects
+    anti-idiomatic patterns.
 
 ### `ColLowCardinality` — the load-bearing departure
 

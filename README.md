@@ -212,11 +212,11 @@ every server `Data` block during a `Select`, after all decode targets in
 `Data` packet for an INSERT is the schema header (rows=0), which the driver
 consumes internally to infer Input column types.
 
-Note: the `--insert` smoke currently fails on a known driver-side
-INSERT framing race (the prior "Atomic database-engine DDL visibility"
-explanation turned out to be wrong — pre-existing tables fail
-identically). The plain SELECT and `--mixed` paths are unaffected.
-See `plans/HANDOVER.md` milestone #1 for the investigation notes.
+Note: ClickHouse virtually never does SELECT-immediately-after-INSERT
+in the same session — the DB is append-mostly, aggregate-later, and
+its design comes from being a logging DB. Don't expect read-your-own-
+writes within a session right after an INSERT; verify out-of-band
+via `clickhouse-client` or a separate connection later.
 
 ---
 

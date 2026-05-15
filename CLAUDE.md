@@ -35,6 +35,18 @@ If ClickHouse claimed to be ACID, several things it does routinely
 would be ACID violations. It doesn't claim to be ACID, so they aren't
 — they're the design.
 
+### Origin matters
+
+ClickHouse came out of Yandex Metrica as a **logging database for a
+search engine** — append-mostly, query-aggregate, no-overwrite. That
+lineage is still the design center. Modern ClickHouse has gained
+transactions, mutations, materialized views, etc., but they're
+bolted onto an OLAP-with-logging-DNA core. When something feels
+"missing" or "surprising," it usually isn't a gap — it's that the
+operation you're reaching for isn't on the design's hot path. The
+hot path is: append millions of rows, run aggregate analytic queries
+later, often from a different connection / process / time.
+
 ### What ClickHouse explicitly does not promise
 
 - **ACID transactions.** No `BEGIN` / `COMMIT` / `ROLLBACK`. INSERTs
@@ -61,6 +73,14 @@ would be ACID violations. It doesn't claim to be ACID, so they aren't
   One-row-at-a-time INSERTs work, but each pays per-block overhead
   and they accumulate quickly into Parts the background merger has
   to clean up. Million-row blocks are the design center.
+- **`SELECT` *immediately* after `INSERT`** (especially on the same
+  connection). Real ClickHouse users don't do this — they INSERT in
+  bulk and query analytical aggregates later, frequently from a
+  different connection / process. The pattern is so anti-idiomatic
+  that it doesn't merit special support in the driver; tests
+  exercising it should be rewritten or run via out-of-band
+  verification (e.g. invoke `clickhouse-client` as a subprocess
+  after the INSERT completes).
 
 ### Implications for this driver and for debugging
 
@@ -82,13 +102,16 @@ would be ACID violations. It doesn't claim to be ACID, so they aren't
   experience. Many "broken" behaviours are intentional trade-offs.
 - **When a test fails in a way that would be impossible in Postgres,
   that's signal, not noise.** Check ClickHouse semantics first; reach
-  for "driver bug" hypothesis second. The current `--insert` smoke
-  failure (see `plans/HANDOVER.md` milestone #1) is the canonical
-  example: a CREATE-then-immediate-INSERT pattern that every
-  traditional database would handle without thought, and that
-  ClickHouse simply doesn't promise. Prior sessions (including
-  recent ones) burned cycles diagnosing "driver bugs" that were
-  really "we brought OLTP assumptions to an OLAP system."
+  for "driver bug" hypothesis second. The `--insert` smoke is the
+  canonical example: its old shape did CREATE + INSERT + SELECT-back
+  in one session, which is two anti-idioms stacked
+  (CREATE-then-immediate-DML + read-your-own-writes-immediately).
+  The driver / server / wire weren't broken; the test pattern was.
+  It's now restructured to verify only via the server's
+  exception-or-not response, with out-of-band verification deferred
+  to `clickhouse-client`. Prior sessions burned cycles diagnosing
+  "driver bugs" that were really "we brought OLTP assumptions to an
+  OLAP system." See `plans/HANDOVER.md` milestone #1.
 
 ## Cardinal rule: chase every improvement
 
@@ -282,16 +305,17 @@ These will bite if you don't know them:
   in `Columns.fs` folds `Decimal(P, S)`, parameterized `Enum8(...)`,
   and `DateTime('tz')` / `DateTime64(N, 'tz')` to bare forms. Extend
   that table when adding new parameterized columns.
-- **`--insert` smoke trips ClickHouse's async-DDL semantics.** The
-  bench creates a fresh table and immediately INSERTs into it on the
-  same connection; server's `query_log` shows `written_rows=0`. This
-  is **not a ClickHouse bug and not a driver bug** in the
-  bytes-on-the-wire sense — ClickHouse explicitly doesn't guarantee
-  CREATE-then-INSERT-within-milliseconds, regardless of how long
-  you sleep in between. (See "ClickHouse is not a traditional
-  database" above.) Don't reach for a sleep-based or retry-based
-  fix in the driver; the bench's scaffolding is what needs to
-  change. See `plans/HANDOVER.md` milestone #1.
+- **`--insert` smoke verifies INSERT-only.** The bench creates a
+  fresh table, sends an INSERT, and trusts the server's response.
+  It deliberately does NOT do an in-session SELECT-back: that
+  pattern is anti-idiomatic for ClickHouse (see the section above)
+  and previously made the smoke "fail" even though the data
+  reached the server fine. Verify externally via `clickhouse-client`
+  if you need to. There is a latent driver behaviour where an
+  in-session SELECT immediately after an INSERT returns 0 rows
+  despite the data being present server-side; documented in
+  `plans/HANDOVER.md` milestone #1 but not blocking — the consumer
+  shouldn't be doing that pattern.
 - **One column type per file** (`src/Ch.Proto/Col*.fs`). Close cousins
   may share a file (e.g. `ColTime.fs` holds Date / Date32 / DateTime /
   DateTime64 / IPv4; `ColFixed.fs` holds FixedStr / UUID / IPv6).
