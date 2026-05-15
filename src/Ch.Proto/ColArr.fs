@@ -28,9 +28,12 @@ type ColArr<'T>(inner: IColumnOf<'T>) =
     /// Number of offset entries currently held (one per array row).
     member _.OffsetsCount = offsetsCount
     /// Zero-copy view of the cumulative offsets (UInt64 each).
-    /// `Span.[i] = end-of-row-i` in `Inner`. Lifetime: valid only until the
-    /// next `Append` / `AppendSpan` / `DecodeColumn` / `Reset`.
-    member _.OffsetsSpan : ReadOnlySpan<uint64> =
+    /// `Span.[i] = end-of-row-i` in `Inner`. Method (not property) for
+    /// surface consistency with the other span accessors (`AsSpan`,
+    /// `RowSpan`, `NullsSpan`, `ValueSpan`). Lifetime: valid only
+    /// until the next `Append` / `AppendSpan` / `DecodeColumn` /
+    /// `Reset`.
+    member _.OffsetsSpan() : ReadOnlySpan<uint64> =
         ReadOnlySpan(offsets, 0, offsetsCount)
     /// Flat values column.
     member _.Inner = inner

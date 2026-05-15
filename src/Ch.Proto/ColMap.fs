@@ -31,9 +31,11 @@ type ColMap<'K, 'V when 'K : equality and 'K : not null>(keys: IColumnOf<'K>, va
     /// Number of offset entries currently held (one per map row).
     member _.OffsetsCount = offsetsCount
     /// Zero-copy view of the cumulative offsets (UInt64 each).
-    /// `Span.[i] = end-of-row-i` in `Keys` / `Values`. Lifetime: valid only
-    /// until the next `Append` / `AppendKV` / `DecodeColumn` / `Reset`.
-    member _.OffsetsSpan : ReadOnlySpan<uint64> =
+    /// `Span.[i] = end-of-row-i` in `Keys` / `Values`. Method (not
+    /// property) for surface consistency with the other span
+    /// accessors. Lifetime: valid only until the next `Append` /
+    /// `AppendKV` / `DecodeColumn` / `Reset`.
+    member _.OffsetsSpan() : ReadOnlySpan<uint64> =
         ReadOnlySpan(offsets, 0, offsetsCount)
     /// Flat keys column.
     member _.Keys = keys
