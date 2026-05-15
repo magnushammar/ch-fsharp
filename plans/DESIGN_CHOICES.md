@@ -12,7 +12,6 @@ but not yet started; they will wrap the low-level API.
 
 | Topic | Reason for deferring |
 |---|---|
-| **LC(FixedString)** | Needs `IEqualityComparer<byte[]>` for content-hashing in the write-side dedup `Dictionary`. No concrete use case yet — ship LC(String) and LC(numeric) only. |
 | **LC of composite types** (Nullable, Array, …) | Recursive `IColumnOf<'T>` over composite inner. Will revisit when we implement composites. |
 | **Decimal256** | Underlying Int256 not in .NET; needs a custom 32-byte struct. Decimal32/64/128 are shipped. |
 | **Int256 / UInt256** | No .NET native type; requires a custom 32-byte struct. |
@@ -176,3 +175,60 @@ but not yet started; they will wrap the low-level API.
 13. **Bench harness is a Python script (`scripts/bench.py`)** mimicking
     hyperfine because hyperfine isn't installed on the bench host. ch-bench
     upstream uses `hyperfine -w 10 -r 100`.
+
+### Bulk-access facets (Tier 3)
+
+14. **Three additive bulk-access interfaces** in `Columns.fs`:
+    - `IBulkAppendable<'T>.AppendRange(ReadOnlySpan<'T>)` — bulk write
+      via `MemoryMarshal.Cast`. Implemented on `ColPrimitive<'T>` base
+      (all 16 primitive leaves inherit).
+    - `IBulkReadable<'T>.AsSpan() : ReadOnlySpan<'T>` — typed view
+      aliasing the column's byte buffer. Same — all primitive leaves
+      inherit.
+    - `IRowBytes.RowBytes(i) : ReadOnlySpan<byte>` — per-row byte view
+      irrespective of typed `'T`. Implemented by `ColStr` and the
+      `ColFixedBytes` family (so `ColFixedStr`, `ColUUID`, `ColIPv6`).
+
+    `ColArr<'T>` dispatches `AppendSpan` and `RowSpan(i)` through these
+    when `inner` is bulk-capable, falling back to per-row otherwise.
+    `ColNullable<'T>.ValueSpan()` exposes the inner typed buffer for
+    branchless null-masking. `ColLowCardinality<'T>.RowSpan(i)` exposes
+    the dict's byte slice when `inner` is `IRowBytes` (covers both
+    `LowCardinality(String)` and `LowCardinality(FixedString(N))`).
+    All zero-alloc on the fast path; F# consumers that want managed
+    `'T` values stay on the existing `Row(i)` path.
+
+15. **`ColLowCardinality<'T>` materialises `dictArray` lazily.** The
+    `for k in 0..dRows-1 do dictArray[k] <- inner.Row(k)` loop that
+    used to run eagerly in `DecodeColumn` is deferred to first
+    `Row(i)` / `Dictionary` call. Byte-span consumers using `RowSpan(i)`
+    skip it entirely — for `LowCardinality(String)` that saves dRows
+    string allocations per block. F#-string consumers see no change in
+    behaviour or amortised cost: the first `Row(i)` warms the cache;
+    subsequent calls hit the array deref.
+
+16. **`ColLowCardinality<'T>` dedups inline at `Append` time** instead of
+    staging values in a `ResizeArray<'T>` and dedupping in `Prepare`.
+    The new path: `Append` does `dedup.TryGetValue`; existing values
+    reuse the key, new values push to `inner` and register. `Prepare`
+    now only picks the byte width for the keys. Saves the staged-values
+    buffer (`8 bytes/row × rowCount` for reference-typed `'T`) and one
+    pass over the data. Reset clears the dedup dictionary across blocks.
+
+17. **`ColLowCardinality<'T>` accepts an optional custom
+    `IEqualityComparer<'T>`** so the dedup dictionary can use content
+    hashing for `byte[]` (default array equality is reference-based).
+    Used by `ColFixedStr.LowCardinality()` to pass
+    `ByteArrayContentEqualityComparer.Instance` (FNV-1a 64-bit folded
+    to int), closing the `LowCardinality(FixedString(N))` gap. The
+    typed `Append(byte[])` / `Row(i): byte[]` surface on `ColFixedStr`
+    is the matching `IColumnOf<byte[]>` impl required by LC dedup.
+
+18. **`ColAuto.build` handles general `Map(K, V)`** via one-time
+    reflection at construction (`typedefof<ColMap<_,_>>.MakeGenericType` +
+    `Activator.CreateInstance`). `Map(String, String)` stays on a
+    static fast path. The resulting `ColMap<'K, 'V>` runs through the
+    static JIT-specialised hot path forever after — reflection is paid
+    once, decode/encode never. Constraint violations (`'K` not
+    `equality + not null`) unwrap the `TargetInvocationException` so
+    callers see the inner error directly.

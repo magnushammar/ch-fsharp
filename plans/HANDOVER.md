@@ -29,12 +29,44 @@ return plain values, no `Task` wrappers. SELECT vs INSERT is type-safe —
 separate methods, replacing the old mode-inferred `ChQuery`
 (`DESIGN_CHOICES.md` items 12–13).
 
+**Tier 2 (ColAuto composites via the ColPrimitive collapse) shipped.**
+`ColAuto.build` now constructs `Array(T)` / `Nullable(T)` /
+`LowCardinality(T)` / `Tuple(...)` recursively via three facet
+interfaces — `IArrayable`, `INullable`, `ILowCardinality` — implemented
+on the `ColPrimitive<'T>` base (every primitive leaf inherits for
+free) plus on every typed non-primitive column. `ColArr` /
+`ColNullable` / `ColMap` internals refactored to raw `uint64[]` /
+`byte[]` / `uint64[]` to break the previous ColPrimitive → ColArr →
+ColUInt64 cycle. Wire format bit-identical.
+
+**Tier 3 (bulk-access facets + LC(String) byte-span + LC(FixedString)
++ Map(K,V) in ColAuto) shipped.** Three more additive facets in
+`Columns.fs` — `IBulkAppendable<'T>` (`AppendRange`), `IBulkReadable<'T>`
+(`AsSpan`), `IRowBytes` (`RowBytes`) — wired on the appropriate
+columns. `ColArr<'T>.AppendSpan` and the new `RowSpan(i)` dispatch via
+these for zero-alloc bulk paths when `inner` is primitive.
+`ColNullable<'T>.ValueSpan()` exposes the typed values span for
+branchless null-masking. `ColLowCardinality<'T>` now does inline
+dedup on `Append` (no staged-values buffer) and materialises the
+`'T[]` dict lazily on first `Row(i)` — byte-span consumers using
+`RowSpan(i)` skip materialisation entirely. `LowCardinality(FixedString(N))`
+works end-to-end via `ByteArrayContentEqualityComparer` (FNV-1a)
+plus `ColFixedStr : IColumnOf<byte[]>` + the three composite facets.
+`ColAuto.build` general `Map(K, V)` via one-time reflection at
+construction (`Map(String, String)` stays on a static fast path).
+
 All Expecto tests pass. Live smokes against `localhost:9000` —
-`Ch.Bench.Numbers --ping / --mixed / --insert / --rows 100` — all green:
-`--mixed` exercises 13 result columns through Map, Tuple, Decimal, Enum8,
-Point, IntervalDay, JSON, BFloat16; `--insert` round-trips four rows
-through a Memory-engine table. `ColAuto` resolves any scalar /
-parameterised type from a server-sent type string for ad-hoc receive.
+`Ch.Bench.Numbers --ping / --mixed / --rows 100` — all green:
+`--mixed` exercises 14 result columns through Map, Tuple, Decimal,
+Enum8, Point, IntervalDay, JSON, BFloat16, and
+`LowCardinality(FixedString(8))`. `ColAuto` resolves any scalar /
+parameterised / composite (Array / Nullable / LC / Tuple / Map) type
+from a server-sent type string for ad-hoc receive.
+
+> `--insert` currently flakes on the pre-existing Atomic-DB visibility
+> race documented under "Gotchas" — not a driver regression; CREATE
+> TABLE returns before the table is visible to the subsequent INSERT.
+> See "Next milestones" for the planned mitigation.
 
 ## Repo map
 
@@ -111,9 +143,11 @@ RESULTS.md                               bench numbers + analysis
 | Int256, UInt256 (custom 32-byte struct) | ✅ |
 | BFloat16 (float32 helpers) | ✅ |
 | LZ4 framing on INSERT bodies | ✅ |
-| ColAuto inference (scalars + parameterised) | ✅ (composites NOT auto-built) |
+| ColAuto inference (scalars + parameterised + composites + Map(K,V)) | ✅ |
+| Bulk-access facets (IBulkAppendable / IBulkReadable / IRowBytes) | ✅ |
+| LowCardinality(String) byte-span access (RowSpan + lazy dict) | ✅ |
+| LowCardinality(FixedString(N)) — content-hash dedup | ✅ |
 | Time / Time64 | ⛔ (server here doesn't have it) |
-| LowCardinality(FixedString) | ⛔ (needs content-hash IEqualityComparer) |
 | INSERT (single block + OnInput streaming) | ✅ |
 | Full-duplex query loop | ✅ (single-threaded send/wait-header/send-input/drain) |
 | Connection pool | ⛔ (ch-go has it as separate package) |
@@ -123,30 +157,25 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **ColAuto for composites**: today `ColAuto` rejects `Array(T)` /
-   `Nullable(T)` / `Map(K,V)` / `Tuple(T1,…)` / `LowCardinality(T)`.
-   Lifting that requires either reflection (`MakeGenericType` +
-   `Activator.CreateInstance`) or non-generic decode-only variants
-   (`ColArrAny`, `ColNullableAny`, …). The reflection route is shorter
-   but slower; the non-generic-variant route adds ~5 small files but
-   keeps the JIT-inlined hot path.
+1. **Atomic-DB INSERT visibility race**: `Ch.Bench.Numbers --insert`
+   flakes because the default `default` database is an Atomic engine,
+   where `CREATE TABLE` returns before the table is visible. The
+   200 ms sleep in the smoke isn't enough. Real fix options: query
+   `system.tables` until the table appears, switch the smoke to a
+   non-Atomic engine, or split the smoke into create-and-poll +
+   insert-and-verify halves. Pure tooling change; no driver code
+   touched.
 
-2. **LowCardinality(FixedString)**: needs an `IEqualityComparer<byte[]>`
-   (FNV-1a / xxhash content hash) **and** a `ColFixedStr` that
-   implements `IColumnOf<byte[]>` (today it's `IColumnResult` only,
-   with raw `AppendBytes`/`RowSpan` Span APIs). Moderate API impact;
-   the per-row byte-array allocation is the unavoidable cost.
-
-3. **Connection pool**: ch-go has it in a separate `chpool` package and
+2. **Connection pool**: ch-go has it in a separate `chpool` package and
    explicitly disclaims it as out-of-core. Worth a small F# port for
    server workloads but not perf-critical for the driver itself.
 
-4. **Query cancellation watchdog**: a `Task`-side fiber that fires
+3. **Query cancellation watchdog**: a `Task`-side fiber that fires
    `ClientCodeCancel` when the user's `CancellationToken` flips. Today
    we plumb the `CancellationToken` through but never proactively send
    Cancel.
 
-5. **ZSTD compression**: LZ4 covers the dominant case. ZSTD adds another
+4. **ZSTD compression**: LZ4 covers the dominant case. ZSTD adds another
    compression library dependency and a method=0x90 encode/decode branch
    parallel to the existing LZ4 path.
 
@@ -201,7 +230,7 @@ Run all tests: `dotnet run --project tests/Ch.Proto.Tests`.
 Manual server queries: `clickhouse-client --password "$CLICKHOUSE_PASSWORD"
 -q "..."`. Useful for inspecting golden bytes, profile events, etc.
 
-## Bench takeaways (RESULTS.md has detail)
+## Bench takeaways (PERF_INVESTIGATION.md has detail)
 
 The bench is **not useful as a perf signal on this hardware** — server and
 client share a consumer i7, so we measure CPU contention + power-state
@@ -209,9 +238,9 @@ recovery, not driver throughput.
 
 ch-bench's published numbers come from `hyperfine -w 10 -r 100` (no settle)
 on a setup where this self-DoS effect doesn't dominate. We can't reproduce
-that locally. RESULTS.md documents the bimodal pattern (fast ~600 ms ↔
-slow ~1900 ms) that affects all three clients (F#, Go, clickhouse-client
-uncompressed) symmetrically.
+that locally. `PERF_INVESTIGATION.md` documents the full investigation,
+including the bimodal pattern (fast ~600 ms ↔ slow ~1900 ms) that affects
+all three clients (F#, Go, clickhouse-client uncompressed) symmetrically.
 
 We are at perf parity with ch-go where it can be measured (within ~5% on
 LZ4-compressed, within ~10% on uncompressed best-time).

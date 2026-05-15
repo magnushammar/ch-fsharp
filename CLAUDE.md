@@ -21,6 +21,27 @@ Reference implementation lives at `reference/ch-go/` (git submodule,
 read-only). When in doubt about wire format or semantics, check the
 Go source there before guessing.
 
+## Cardinal rule: chase every improvement
+
+If you notice a hint of a possible optimization or API improvement that
+does not hurt performance, **investigate it thoroughly and implement it
+— even when the win looks small.** We aim for perfection and are
+willing to pay the price of refactors, breaking changes, and careful
+review to get there. This is pre-1.0; the cost of code churn is low and
+the cost of accumulated "good enough" is high.
+
+In practice:
+
+- Don't park observations like "this could be cleaner / smaller /
+  faster" for later. Surface them, investigate, implement.
+- Don't dismiss a fix because the diff would touch many files — we
+  have no external consumers (see "Pre-1.0 API stability" below).
+- The opposite failure is also a failure: shipping an "improvement"
+  that silently regresses perf, type fidelity, or wire correctness.
+  Changes that touch the encode / decode hot path or wire format
+  require benchmark + golden-byte verification before they land (see
+  "Triaging proposed changes" below).
+
 ## Commands
 
 All commands assume the repo root as cwd. .NET 10 SDK and a reachable
@@ -135,8 +156,23 @@ ColNothing). The composite wrappers (`ColArr`, `ColNullable`,
 `ColAuto.build` uses these facets for runtime-string → static-generic
 dispatch on `Array( / Nullable( / LowCardinality(`. `Tuple(` gets a
 depth-aware comma parser. `Map(String, String)` and `Nullable(Nothing)`
-are hardcoded (ch-go does the same); general `Map(K,V)` is deferred
-until a real consumer needs it.
+are hardcoded fast paths; general `Map(K, V)` resolves via one-time
+reflection at construction (`MakeGenericType` + `Activator.CreateInstance`),
+with zero hot-path cost.
+
+**Bulk-access facets** (in `Columns.fs`) — `IBulkAppendable<'T>.AppendRange`,
+`IBulkReadable<'T>.AsSpan`, `IRowBytes.RowBytes` — implemented on
+`ColPrimitive<'T>` (free for all primitives) and on `ColStr` /
+`ColFixedBytes`. `ColArr<'T>.AppendSpan` / `RowSpan` and
+`ColNullable<'T>.ValueSpan` dispatch through them for zero-alloc bulk
+paths when the inner column is bulk-capable.
+`ColLowCardinality<'T>.RowSpan` exposes the dict's byte slice when
+`inner` is `IRowBytes` (works for `LowCardinality(String)` and
+`LowCardinality(FixedString(N))`). `ColLowCardinality<'T>` does inline
+dedup at `Append` time and materialises its `'T[]` dict lazily on
+first `Row(i)` — byte-span consumers skip it entirely.
+`LowCardinality(FixedString(N))` uses
+`ByteArrayContentEqualityComparer` (FNV-1a) for content dedup.
 
 ### Internal storage for offset / null-mask buffers
 
