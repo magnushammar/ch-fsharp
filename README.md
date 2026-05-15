@@ -31,7 +31,7 @@ server (default `localhost:9000`).
 ch-go is included as a submodule.
 
 ```bash
-dotnet run --project tests/Ch.Proto.Tests           # 202 Expecto tests
+dotnet run --project tests/Ch.Proto.Tests           # 233 Expecto tests
 dotnet run --project src/Ch.Bench.Numbers -- --ping # smoke handshake
 ```
 
@@ -65,6 +65,121 @@ client.Ping(cts.Token)
 
 `Client` wraps one TCP connection. It is **not thread-safe** — use one
 instance per concurrent query. Disposing the client closes the socket.
+
+---
+
+## Two fundamental usage patterns
+
+The driver supports two coexisting paths, each optimised for a
+different use case. Pick one per query; you can mix them per `Client`.
+
+### Path 1 — Pre-declared typed columns (the fast path)
+
+You know your schema at compile time. You declare typed columns
+(`ColInt32()`, `ColStr()`, `ColArr<int32>(ColInt32())`, …), pass them
+to a `SelectQuery.Results` / `InsertQuery.Input` list, and read /
+write through the typed `Row(i) : 'T` / `Append(v: 'T)` surface. The
+JIT specialises every primitive per value type — no virtual dispatch
+on the bytes-in / bytes-out path. **Ship this in production.**
+
+Minimal SELECT:
+
+```fsharp
+let n = ColInt32()
+let s = ColStr()
+let onBlock (rows: int) =
+    for i in 0 .. rows - 1 do
+        printfn "%d %s" (n.Row(i)) (s.Row(i))
+
+let q = { SelectQuery.defaults with
+            Body = "SELECT toInt32(number) AS n, toString(number) AS s
+                    FROM system.numbers LIMIT 1000"
+            Results = [ { Name = "n"; Column = n }
+                        { Name = "s"; Column = s } ]
+            OnBlock = onBlock }
+client.Select(q, ct)
+```
+
+Minimal INSERT (against a pre-existing table):
+
+```fsharp
+let id    = ColInt32()
+let name  = ColStr()
+let score = ColFloat64()
+
+id.Append(1);  name.Append("alpha"); score.Append(1.5)
+id.Append(2);  name.Append("beta");  score.Append(2.5)
+
+let q = { InsertQuery.defaults with
+            Body  = "INSERT INTO my_table VALUES"
+            Input = [ { Name = "id";    Column = id }
+                      { Name = "name";  Column = name }
+                      { Name = "score"; Column = score } ] }
+client.Insert(q, ct)
+```
+
+Full details for every column type live under **Column types
+reference** and **Composite types** below.
+
+For zero-allocation bulk paths on the read/write hot loops — `AsSpan()`
+on primitives, `AppendRange` for bulk write, `RowSpan(i)` on `ColArr`
+when the inner is primitive, `ValueSpan()` / `NullsSpan()` on
+`ColNullable`, `KeysSpan()` / `DictionarySpan()` on
+`ColLowCardinality` — see the per-column sections and the
+`IBulkAppendable<'T>` / `IBulkReadable<'T>` / `IRowBytes` facet
+interfaces in `Columns.fs`.
+
+### Path 2 — Runtime type-string dispatch via `ColAuto` (the generic path)
+
+You don't know the schema at compile time — ad-hoc REPLs, schema
+explorers, generic dashboards, type tooling. `ColAuto.build "Array(Int32)"`
+parses the type string and returns the right concrete column.
+Composites recurse (`Array(Nullable(LowCardinality(String)))` works);
+`Map(K, V)` resolves via one-time reflection at construction
+(`MakeGenericType` + `Activator.CreateInstance`), then the resulting
+`ColMap<'K, 'V>` runs through the static JIT-specialised hot path
+forever after.
+
+```fsharp
+// Build a column from a runtime type string:
+let arr = ColAuto.build "Array(Nullable(Int32))" :?> ColArr<int32 voption>
+let lc  = ColAuto.build "LowCardinality(String)"   :?> ColLowCardinality<string>
+let map = ColAuto.build "Map(Int32, Array(Float64))" :?> ColMap<int32, float[]>
+
+// Or use the ColAuto wrapper when you want lazy type inference inside
+// a SELECT (the column resolves itself when the server sends the
+// schema header):
+let auto = ColAuto()
+let q = { SelectQuery.defaults with
+            Body = "SELECT 42 :: Decimal(9, 2) AS d"
+            Results = [ { Name = "d"; Column = auto } ]
+            OnBlock = fun _ ->
+                match auto.Inner with
+                | Some (:? ColDecimal32 as d) -> printfn "%O" (Decimal.fromInt32 (d.Row 0) 2)
+                | _ -> printfn "got %s" auto.Type }
+client.Select(q, ct)
+```
+
+`ColAuto.build` covers every column family this driver implements:
+every primitive, Decimal(P,S), Enum8/16, DateTime64(N, ['tz']),
+FixedString(N), Interval{Scale}, UUID, IPv4/6, Point, Nothing,
+JSON, BFloat16 — and every composite: Array(T), Nullable(T),
+LowCardinality(T), Tuple(...), Map(K, V).
+
+The generic path's only extra cost (compared to Path 1) is one
+`IColumnResult` virtual call per column per block on the
+encode / decode side. For ad-hoc and tooling code that's invisible.
+For the perf-critical inner loops of a real consumer, prefer Path 1.
+
+### Both paths share the same Client
+
+`client.Select(query, ct)` / `client.Insert(query, ct)` work identically
+regardless of whether the columns in `Results` / `Input` were
+pre-declared (Path 1) or built via `ColAuto.build` (Path 2). You can
+mix — e.g. pre-declare the columns you know about and use `ColAuto`
+for the ones you don't.
+
+---
 
 ## Running queries
 
@@ -212,11 +327,15 @@ every server `Data` block during a `Select`, after all decode targets in
 `Data` packet for an INSERT is the schema header (rows=0), which the driver
 consumes internally to infer Input column types.
 
-Note: ClickHouse virtually never does SELECT-immediately-after-INSERT
-in the same session — the DB is append-mostly, aggregate-later, and
-its design comes from being a logging DB. Don't expect read-your-own-
-writes within a session right after an INSERT; verify out-of-band
-via `clickhouse-client` or a separate connection later.
+> ⚠ **Don't SELECT immediately after an INSERT in the same session.**
+> ClickHouse doesn't promise read-your-own-writes inside a session,
+> and real ClickHouse usage never reaches for that pattern in the
+> first place — the DB is append-mostly, aggregate-later, and its
+> design comes from being a logging database for a search engine. If
+> your application needs immediate read-after-write of the data it
+> just inserted, you're using the wrong database; ClickHouse is not
+> Postgres and won't pretend to be. Verify writes out-of-band via
+> `clickhouse-client` or a separate, later connection.
 
 ---
 
@@ -654,10 +773,12 @@ times effectively tie.
 ## Status / coverage
 
 Status of every column family and feature lives in
-`plans/HANDOVER.md`. As of the latest commit: 202 tests pass, INSERT
-and SELECT both work end-to-end with and without LZ4 compression, and
-ColAuto covers every scalar / parameterised type. Composites
-(Array/Nullable/Map/Tuple/LC) are explicit-type only.
+`plans/HANDOVER.md`. As of v0.4.0: 233 tests pass, INSERT and SELECT
+both work end-to-end with and without LZ4 compression, and `ColAuto`
+covers every column we implement — scalars, parameterised types,
+*and* composites (Array / Nullable / Map / Tuple / LowCardinality
+recursively, plus general `Map(K, V)` via one-time reflection at
+construction).
 
 Reference implementation: [ClickHouse/ch-go](https://github.com/ClickHouse/ch-go).
 Departures from ch-go are logged in `plans/DESIGN_CHOICES.md`.
