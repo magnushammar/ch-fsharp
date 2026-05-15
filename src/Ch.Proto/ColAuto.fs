@@ -100,6 +100,37 @@ type ColAuto() =
             acc.Add(body.Substring(startIdx).Trim())
             List.ofSeq acc
 
+        // Split "Map(K, V)" on the top-level comma. K or V may themselves be
+        // composites containing nested commas.
+        let parseMapInners (s: string) : string * string =
+            let body = s.Substring(4, s.Length - 5)  // strip "Map(" and ")"
+            let mutable depth = 0
+            let mutable splitAt = -1
+            let mutable i = 0
+            while i < body.Length && splitAt < 0 do
+                match body.[i] with
+                | '(' -> depth <- depth + 1
+                | ')' -> depth <- depth - 1
+                | ',' when depth = 0 -> splitAt <- i
+                | _ -> ()
+                i <- i + 1
+            if splitAt < 0 then
+                raise (NotSupportedException $"ColAuto: malformed Map type '{s}'")
+            body.Substring(0, splitAt).Trim(),
+            body.Substring(splitAt + 1).Trim()
+
+        // Discover the typed inner of a column by walking its IColumnOf<'X>
+        // interface impl. Returns 'X so we can MakeGenericType ColMap<K,V>.
+        let innerTypeOf (col: IColumnResult) : System.Type =
+            col.GetType().GetInterfaces()
+            |> Array.tryFind (fun ifc ->
+                ifc.IsGenericType
+                && ifc.GetGenericTypeDefinition() = typedefof<IColumnOf<_>>)
+            |> Option.map (fun ifc -> ifc.GetGenericArguments().[0])
+            |> Option.defaultWith (fun () ->
+                raise (NotSupportedException
+                    $"ColAuto: column '{col.Type}' does not implement IColumnOf<'T>; cannot be a Map key/value"))
+
         match t with
         | "Int8" -> ColInt8() :> IColumnResult
         | "Int16" -> ColInt16() :> _
@@ -168,8 +199,8 @@ type ColAuto() =
             ColNullable<Nothing>(ColNothing()) :> _
 
         | "Map(String, String)" ->
-            // Common Map combo hardcoded — ch-go does the same
-            // (col_auto.go:49). General Map(K,V) deferred until needed.
+            // Common Map combo on a static fast path — avoids reflection
+            // entirely for what's likely the hottest Map() case.
             ColMap<string, string>(ColStr(), ColStr()) :> _
 
         | s when s.StartsWith("Array(") ->
@@ -203,10 +234,32 @@ type ColAuto() =
             ColTuple(inners) :> _
 
         | s when s.StartsWith("Map(") ->
-            raise (NotSupportedException(
-                $"ColAuto: general Map(K,V) requires a hardcoded entry; got '{s}'. "
-                + "Only Map(String, String) is wired up; add the (K,V) pair "
-                + "to ColAuto.build if you need it."))
+            // General Map(K, V) — recursively build the key and value
+            // columns, then ColMap<K, V> via one-time reflection at
+            // construction. No hot-path cost: the constructed
+            // ColMap<K, V> runs through the static fast path forever
+            // after.
+            let (kStr, vStr) = parseMapInners s
+            let keyCol = ColAuto.build kStr
+            let valCol = ColAuto.build vStr
+            let kT = innerTypeOf keyCol
+            let vT = innerTypeOf valCol
+            let mapType = typedefof<ColMap<_, _>>.MakeGenericType(kT, vT)
+            let instance =
+                try
+                    System.Activator.CreateInstance(mapType, keyCol, valCol)
+                with
+                | :? System.Reflection.TargetInvocationException as ex ->
+                    // Unwrap reflection wrapper so constraint violations
+                    // (e.g. 'K not equality + not null) surface clearly.
+                    match ex.InnerException with
+                    | null -> reraise ()
+                    | inner -> raise inner
+            match instance with
+            | null ->
+                raise (NotSupportedException
+                    $"ColAuto: ColMap construction for '{s}' returned null")
+            | inst -> inst :?> IColumnResult
 
         | _ ->
             raise (NotSupportedException

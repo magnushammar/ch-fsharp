@@ -40,6 +40,7 @@ let private facetCheckTargets : (string * IColumnResult) list = [
     ("Decimal64",  ColDecimal64()   :> _)
     ("Decimal128", ColDecimal128()  :> _)
     ("Decimal256", ColDecimal256()  :> _)
+    ("FixedString(8)", ColFixedStr(8) :> _)
 ]
 
 [<Tests>]
@@ -129,6 +130,10 @@ let tests = testList "ColAuto" [
         | :? ColLowCardinality<int32> -> ()
         | other -> failtestf "expected ColLowCardinality<int32>, got %A" (other.GetType())
 
+        match ColAuto.build "LowCardinality(FixedString(8))" with
+        | :? ColLowCardinality<byte array> -> ()
+        | other -> failtestf "expected ColLowCardinality<byte[]>, got %A" (other.GetType())
+
     testCase "build constructs Tuple(T1, T2, ...) — ColTuple" <| fun _ ->
         match ColAuto.build "Tuple(String, Int32)" with
         | :? ColTuple as t ->
@@ -145,6 +150,20 @@ let tests = testList "ColAuto" [
         | :? ColMap<string, string> -> ()
         | other -> failtestf "expected ColMap<string, string>, got %A" (other.GetType())
 
+    testCase "build constructs general Map(K, V) via reflection" <| fun _ ->
+        match ColAuto.build "Map(String, Int32)" with
+        | :? ColMap<string, int32> -> ()
+        | other -> failtestf "expected ColMap<string, int32>, got %A" (other.GetType())
+
+        match ColAuto.build "Map(Int32, Float64)" with
+        | :? ColMap<int32, float> -> ()
+        | other -> failtestf "expected ColMap<int32, float>, got %A" (other.GetType())
+
+    testCase "build constructs Map with composite value type" <| fun _ ->
+        match ColAuto.build "Map(String, Array(Int32))" with
+        | :? ColMap<string, int32 array> -> ()
+        | other -> failtestf "expected ColMap<string, int32[]>, got %A" (other.GetType())
+
     testCase "build Array(Array(Int32)) recursive — ColArr<int32 array>" <| fun _ ->
         match ColAuto.build "Array(Array(Int32))" with
         | :? ColArr<int32 array> -> ()
@@ -159,11 +178,6 @@ let tests = testList "ColAuto" [
         match ColAuto.build "Array(LowCardinality(String))" with
         | :? ColArr<string> -> ()
         | other -> failtestf "expected ColArr<string>, got %A" (other.GetType())
-
-    testCase "build rejects general Map(K, V) — only (String, String) hardcoded" <| fun _ ->
-        Expect.throwsT<NotSupportedException>
-            (fun () -> ColAuto.build "Map(String, Int32)" |> ignore)
-            "general Map"
 
     testCase "facet guardrail: every typed column implements IArrayable" <| fun _ ->
         for (name, c) in facetCheckTargets do
