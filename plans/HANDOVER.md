@@ -158,37 +158,49 @@ RESULTS.md                               bench numbers + analysis
 
 ## Next milestones (in suggested order)
 
-1. **`--insert` driver-side timing race** (was misdiagnosed as a
-   `Atomic` database-engine DDL-visibility race — that's a
-   server-side metadata mode, not ACID atomicity, and not actually
-   our bug):
+1. **`--insert` smoke crosses ClickHouse's async-DDL boundary.**
+   The right framing: ClickHouse doesn't promise CREATE-TABLE
+   followed by immediate INSERT works, regardless of whether they
+   share a connection. (See `CLAUDE.md` § "ClickHouse is not a
+   traditional database" for why.) The bench's
+   CREATE-then-INSERT-back-to-back pattern brings traditional-DB
+   assumptions to an OLAP system that doesn't honour them. The
+   driver's wire bytes are correct (verified by in-process hex
+   dump); the server simply finalises the INSERT with
+   `written_rows = 0` before our data block lands.
+
+   **What we observed** (all confirmed empirically):
    - Reliably fails with `INSERT: 4 rows pushed / FAIL: 0 rows back`.
    - Server `query_log` shows `INSERT INTO X (cols) FORMAT Native —
-     written_rows = 0`, i.e. server parses the INSERT but receives
-     zero data rows.
-   - **NOT** a CREATE-visibility race: fails identically with no
-     sleep, 200ms sleep, 2s sleep between CREATE and INSERT, AND
-     with a pre-existing externally-created table (no CREATE in the
-     run at all).
-   - **IS** a timing race at the send point: a `Thread.Sleep(50)` in
-     `Client.fs SendInput` between `EncodeBlankBlock()` and
-     `buf.WriteToAndReset(stream)` makes it pass deterministically.
-     `Sleep(5)` is not enough. The original session's "adding
-     `eprintfn` in the receive loop fixes it" observation also fits:
-     it's the latency between encode-finish and wire-flush that
-     matters, not the contents.
-   - Verified wire bytes are correct (3 columns × 4 rows, BlockInfo
-     with BucketNum=-1, valid uvarints) via in-process hex dump.
-   - **Mechanism unknown.** Next-session candidates: (a) is the
-     external-tables blank marker after the Query packet being
-     misinterpreted as an input-data end-of-data marker by the
-     server, ending the INSERT before our real data lands?
-     (b) is there a Reader buffer state leak between the schema-
-     header decode and the SendInput write? (c) compare ch-go's
-     INSERT wire trace byte-by-byte. (d) tcpdump server-side.
-   - **Do not ship a `Thread.Sleep` workaround** — the cardinal rule
-     forbids "doesn't hurt performance" violations; an unconditional
-     50ms per INSERT hurts high-throughput inserts.
+     written_rows = 0`.
+   - Fails identically with 0ms, 200ms, 2s sleep between CREATE and
+     INSERT. Sleeping more doesn't help.
+   - **Caveat:** a pre-existing externally-created table also fails
+     in our bench — but that test wasn't conclusive, because it
+     still crosses a fresh-connection / fresh-session boundary and
+     ClickHouse's metadata-propagation rules apply there too. The
+     pre-existing-table experiment was investigated under
+     traditional-DB intuition and may not have ruled out async-DDL
+     involvement; do not treat it as definitive evidence of a
+     wire-protocol bug.
+   - A `Thread.Sleep(50)` inside `Client.fs SendInput` between
+     `EncodeBlankBlock()` and `buf.WriteToAndReset(stream)` makes
+     it pass. This is **not** evidence of a driver wire-format bug
+     either — it's evidence that giving the server more time
+     resolves the consistency window, exactly as the
+     async-DDL hypothesis predicts.
+
+   **The fix is on the test scaffolding, not the driver.** Real
+   users don't do CREATE-then-immediate-INSERT — they create tables
+   out-of-band (DBA, migrations, init scripts) and INSERT against
+   long-lived tables. The bench should do the same: a setup script
+   (or one-time helper) creates the test table well before the
+   bench runs; the bench just INSERTs / SELECTs into it.
+
+   **Do not** add `Thread.Sleep` / retries / polling to the driver
+   itself — cardinal rule forbids unconditional perf hits, and more
+   fundamentally the driver shouldn't paper over ClickHouse
+   semantics that consumers need to be aware of.
 
 2. **Connection pool**: ch-go has it in a separate `chpool` package and
    explicitly disclaims it as out-of-core. Worth a small F# port for

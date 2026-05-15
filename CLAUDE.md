@@ -21,6 +21,75 @@ Reference implementation lives at `reference/ch-go/` (git submodule,
 read-only). When in doubt about wire format or semantics, check the
 Go source there before guessing.
 
+## ClickHouse is not a traditional database
+
+This is the framing that subsumes everything else in this file. **If
+you walk in with MSSQL / Postgres / MySQL intuitions, stop and
+recalibrate.** ClickHouse earns its 100M+ rows/s throughput by
+deliberately discarding guarantees traditional databases hold sacred.
+The driver inherits those trade-offs; its job is to be a fast,
+correct bytes-on-the-wire pipe, **not** to paper over the database's
+semantics with transactional veneer.
+
+If ClickHouse claimed to be ACID, several things it does routinely
+would be ACID violations. It doesn't claim to be ACID, so they aren't
+— they're the design.
+
+### What ClickHouse explicitly does not promise
+
+- **ACID transactions.** No `BEGIN` / `COMMIT` / `ROLLBACK`. INSERTs
+  are atomic per-block on a single MergeTree partition, and that's
+  the entire transactional story.
+- **Read-your-own-writes across connections.** Rows INSERTed via
+  connection A are not guaranteed visible from connection B until
+  merges / flushes / replication settle. On replicated tables this
+  can take seconds.
+- **DDL synchronicity.** `CREATE TABLE` returning OK is *not* a
+  promise that the table is queryable from any connection at the next
+  millisecond — there's an async metadata-propagation window. Same
+  for `DROP`, `RENAME`, `ALTER`. The default `Atomic` database engine
+  makes the DDL atomic *as observed* (no partial state) but says
+  nothing about *when* the new state becomes visible everywhere.
+  Going from `CREATE TABLE` to `INSERT INTO` within milliseconds is
+  not a supported pattern, even on the same connection.
+- **Foreign keys, referential integrity, uniqueness constraints.**
+  Not enforced at the database — those are application-side concerns.
+- **Synchronous mutations.** `UPDATE` / `DELETE` are spelled
+  `ALTER ... UPDATE` / `ALTER ... DELETE` *because* they are schema
+  mutations applied lazily to partitions in the background.
+- **Per-row INSERT performance.** ClickHouse is built for bulk.
+  One-row-at-a-time INSERTs work, but each pays per-block overhead
+  and they accumulate quickly into Parts the background merger has
+  to clean up. Million-row blocks are the design center.
+
+### Implications for this driver and for debugging
+
+- **Don't add transactional veneer.** If a sequence like `CREATE TABLE`
+  followed by immediate `INSERT` silently no-ops, that's likely
+  ClickHouse working as designed, not a driver bug to hide with
+  internal sleeps, retries, or invisible synchronisation. The
+  driver's contract is "I sent the bytes you asked me to send; the
+  server responded with these bytes." Anything more is consumer
+  territory.
+- **Bulk-OLAP is the design center.** Tables live for a long time;
+  they're created out-of-band by DBAs, migrations, or init scripts.
+  Application code INSERTs in bulk and SELECTs in bulk against
+  pre-existing tables. The driver is optimised for that, not for
+  ORM-style per-row operations.
+- **Question every "it works in Postgres" gut-check.** When something
+  looks like a database bug, read the *ClickHouse* docs or check
+  `reference/ch-go/` first — don't extrapolate from traditional-DB
+  experience. Many "broken" behaviours are intentional trade-offs.
+- **When a test fails in a way that would be impossible in Postgres,
+  that's signal, not noise.** Check ClickHouse semantics first; reach
+  for "driver bug" hypothesis second. The current `--insert` smoke
+  failure (see `plans/HANDOVER.md` milestone #1) is the canonical
+  example: a CREATE-then-immediate-INSERT pattern that every
+  traditional database would handle without thought, and that
+  ClickHouse simply doesn't promise. Prior sessions (including
+  recent ones) burned cycles diagnosing "driver bugs" that were
+  really "we brought OLTP assumptions to an OLAP system."
+
 ## Cardinal rule: chase every improvement
 
 If you notice a hint of a possible optimization or API improvement that
@@ -213,19 +282,16 @@ These will bite if you don't know them:
   in `Columns.fs` folds `Decimal(P, S)`, parameterized `Enum8(...)`,
   and `DateTime('tz')` / `DateTime64(N, 'tz')` to bare forms. Extend
   that table when adding new parameterized columns.
-- **`--insert` smoke has a known driver-side timing race.** Server
-  receives the INSERT but parses zero data rows (`query_log:
-  written_rows=0`) even though the encoded bytes are correct. The
-  `Thread.Sleep(200)` between CREATE and INSERT doesn't actually fix
-  it (verified — pre-existing tables also fail). Active hypothesis:
-  the external-tables blank sentinel sent right after the Query
-  packet gets misclassified as an input-data end-of-data marker
-  under tight timing, finalising the INSERT before our real data
-  block arrives. See `plans/HANDOVER.md` milestone #1.
-  *(Previously misattributed to ClickHouse's `Atomic` database engine
-  — that's a server-side metadata-management mode, nothing to do with
-  ACID transactions, and not actually our bug. The misnomer caused
-  months of misdiagnosis; don't repeat it.)*
+- **`--insert` smoke trips ClickHouse's async-DDL semantics.** The
+  bench creates a fresh table and immediately INSERTs into it on the
+  same connection; server's `query_log` shows `written_rows=0`. This
+  is **not a ClickHouse bug and not a driver bug** in the
+  bytes-on-the-wire sense — ClickHouse explicitly doesn't guarantee
+  CREATE-then-INSERT-within-milliseconds, regardless of how long
+  you sleep in between. (See "ClickHouse is not a traditional
+  database" above.) Don't reach for a sleep-based or retry-based
+  fix in the driver; the bench's scaffolding is what needs to
+  change. See `plans/HANDOVER.md` milestone #1.
 - **One column type per file** (`src/Ch.Proto/Col*.fs`). Close cousins
   may share a file (e.g. `ColTime.fs` holds Date / Date32 / DateTime /
   DateTime64 / IPv4; `ColFixed.fs` holds FixedStr / UUID / IPv6).

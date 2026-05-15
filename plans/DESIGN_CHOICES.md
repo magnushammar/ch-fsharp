@@ -126,18 +126,19 @@ but not yet started; they will wrap the low-level API.
     already appended for INSERT. The handler now skips body decode
     entirely when `insertHeader` is true.
 
-14. **`--insert` smoke fails with a driver-side timing race.**
-    Server's `query_log` reports `written_rows=0` for our INSERTs
-    despite the wire bytes being correct. The 200 ms sleep in the
-    smoke between CREATE and INSERT is a vestige of an *incorrect*
-    earlier diagnosis ("Atomic database-engine DDL visibility race")
-    that this round disproved — pre-existing tables also fail, and
-    the actual passing-vs-failing threshold lives in `SendInput`'s
-    encode→flush gap. The real mechanism is unknown; current best
-    hypothesis is that the external-tables blank sentinel sent right
-    after the Query packet is misclassified by the server as an
-    input-data end-of-data marker under tight timing, ending the
-    INSERT context before the data block lands. See HANDOVER #1.
+14. **`--insert` smoke crosses ClickHouse's async-DDL boundary.**
+    The bench creates a fresh table then INSERTs into it
+    back-to-back on the same connection; server's `query_log`
+    reports `written_rows=0`. This is *not* a driver wire-format
+    bug — the bytes we send are correct (verified by in-process hex
+    dump). It's ClickHouse working as designed: CREATE-then-INSERT-
+    within-milliseconds is not a supported pattern, regardless of
+    how long you sleep in between. (See `CLAUDE.md` §
+    "ClickHouse is not a traditional database".) The driver
+    shouldn't paper over this with internal sleeps or retries.
+    Restructuring the bench so table setup happens out-of-band
+    (separate process / init script) is the right fix. See
+    HANDOVER #1.
 
 ### `ColLowCardinality` — the load-bearing departure
 
