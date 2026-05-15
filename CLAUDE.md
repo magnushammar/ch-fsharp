@@ -151,7 +151,7 @@ dotnet run --project tests/Ch.Proto.Tests -- --filter-test-case "foo"   # single
 # Live-server smokes (Ch.Bench.Numbers reads $CLICKHOUSE_PASSWORD from env)
 dotnet run --project src/Ch.Bench.Numbers -c Release -- --ping     # handshake only
 dotnet run --project src/Ch.Bench.Numbers -c Release -- --mixed    # 13-column end-to-end
-dotnet run --project src/Ch.Bench.Numbers -c Release -- --insert   # CREATE+INSERT+SELECT
+dotnet run --project src/Ch.Bench.Numbers -c Release -- --insert   # CREATE + INSERT (verify out-of-band)
 dotnet run --project src/Ch.Bench.Numbers -c Release -- --rows 100 # tiny UInt64 SELECT
 ```
 

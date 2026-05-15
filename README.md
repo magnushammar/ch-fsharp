@@ -481,9 +481,19 @@ lc.Append("frequent")   // first occurrence: pushed to inner dict
 lc.Append("frequent")   // dedup → same key
 ```
 
-`LowCardinality(FixedString(N))` is not yet supported — `byte[]`
-default equality is reference-based; a content-hash comparer is
-needed.
+`LowCardinality(FixedString(N))` is supported via
+`ColLowCardinality<byte array>(ColFixedStr(N))`. The dedup dictionary
+auto-defaults to `ByteArrayContentEqualityComparer` (FNV-1a content
+hash) for `byte[]` keys, since default array equality is
+reference-based. Pass a custom `IEqualityComparer<byte[]>` to the
+constructor if you want different semantics.
+
+```fsharp
+let lc = ColLowCardinality<byte array>(ColFixedStr(8))
+lc.Append(Array.replicate 8 0xAAuy)
+lc.Append(Array.replicate 8 0xAAuy)  // dedup → reference-distinct, content-same
+// lc.Inner.Rows = 1; lc.Rows = 2
+```
 
 ---
 
@@ -508,13 +518,24 @@ client.Select(q, ct)
 
 `ColAuto` handles every scalar — primitives, BFloat16, String, JSON,
 Date/Date32/DateTime/DateTime64, UUID, IPv4, IPv6, Point, Nothing,
-Decimal(P, S), Enum8/16, FixedString(N), Interval{Scale}. **Composites
-are explicitly NOT auto-built** — use the explicit column class for
-Array / Nullable / Map / Tuple / LowCardinality, since the inner
-element type can't be erased without losing typed `Row` access.
+Decimal(P, S), Enum8/16, FixedString(N), Interval{Scale} — **plus
+every composite**: `Array(T)`, `Nullable(T)`, `LowCardinality(T)`,
+`Tuple(...)` recursively, and `Map(K, V)` (general K/V via one-time
+reflection at construction, with `Map(String, String)` on a static
+fast path). The resulting column runs through the JIT-specialised
+hot path forever after — reflection is paid once, decode / encode
+never.
 
-The factory `ColAuto.build (typeString)` returns a configured
-`IColumnResult` directly if you don't want the `ColAuto` wrapper.
+```fsharp
+let arr  = ColAuto.build "Array(Nullable(Int32))"   // ColArr<int32 voption>
+let lc   = ColAuto.build "LowCardinality(String)"   // ColLowCardinality<string>
+let lcfs = ColAuto.build "LowCardinality(FixedString(8))"  // ColLowCardinality<byte[]>
+let map  = ColAuto.build "Map(Int32, Array(Float64))"      // ColMap<int32, float[]>
+```
+
+To use a typed column, downcast the result. The factory
+`ColAuto.build (typeString)` returns the `IColumnResult` directly if
+you don't want the `ColAuto` wrapper.
 
 ---
 
