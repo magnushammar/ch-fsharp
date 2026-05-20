@@ -181,6 +181,185 @@ for the ones you don't.
 
 ---
 
+## Streaming vs. drain — two API tiers
+
+The two paths above describe how columns are *declared*. On top of
+them, the driver ships two ergonomic SELECT tiers that differ in
+**what the consumer does with the decoded data**:
+
+| Tier | Import         | Memory per call    | Use when                                                                    |
+|------|----------------|--------------------|------------------------------------------------------------------------------|
+| 1    | `open Ch.Stream` | O(max block size)  | You fold each block in place — accumulators, per-row dispatch, SIMD inner loops, bulk `CopyTo`. The dominant pattern. |
+| 2    | `open Ch.Drain`  | O(total rows × Σ col widths) | You need random access to the full result after the SELECT returns — cursor walks, asof joins, lookups, producer/consumer SPSC over a stable typed view. |
+
+Both tiers compile down to `client.Select`. Both interoperate with
+Path 1 / Path 2 columns. Pick per-query based on whether you can
+fold incrementally (Tier 1) or genuinely need the materialised
+result (Tier 2).
+
+### Tier 1 — `Ch.Stream` (streaming)
+
+`Stream` is a static class with three layers:
+
+- **`Stream.rows_<shape>(client, sql, action)`** — per-row callback
+  with typed primitive arguments. The driver allocates the columns
+  internally, decodes each block in place, and invokes `action`
+  row-by-row. The shape suffix encodes column types in declaration
+  order (`i64` = `Int64`, `f64` = `Float64`, `u8` = `UInt8`, `i32`
+  = `Int32`, `f64n` = `Nullable(Float64)` with NaN-as-null, `a64`
+  = `Array(Float64)`). Drop-in for simple accumulator loops.
+
+  ```fsharp
+  open Ch.Stream
+  let mutable sum = 0.0
+  Stream.rows_i64f64(client, "SELECT toInt64(number), toFloat64(number) FROM numbers(1_000_000)",
+      fun ts v -> sum <- sum + v)
+  ```
+
+- **`Stream.blocks_<shape>(client, sql, onBlock)`** — per-block
+  callback receiving `ReadOnlySpan<'T>` per column. The driver
+  allocates the columns and decodes each block in place; the
+  callback's spans are exactly `rows` long (no further slicing
+  required). Use this for SIMD-friendly inner loops, bulk-`CopyTo`
+  patterns, or any shape where surfacing the block boundary helps.
+
+  ```fsharp
+  Stream.blocks_i64i64f64f64u8(client,
+      "SELECT epoch_ms, intDiv(epoch_ms,100)*100, qty, price, toUInt8(isBuyerMaker) FROM spot.trades …",
+      fun epochs bars qtys prices ibms ->
+          for i in 0 .. epochs.Length - 1 do
+              // SIMD-friendly inner loop over typed spans
+              ...)
+  ```
+
+  These callbacks take *custom delegates* (`OnBlock1<'A>` …
+  `OnBlock8<…>`) because F# function values cannot hold
+  `ReadOnlySpan<'T>` (it is a ref struct, banned from `FSharpFunc`
+  parameter types by Common IL). F# lambdas auto-convert to the
+  delegate types at the member-call site, so callers never spell
+  the delegate names. The lifetime contract is the same as Path 1:
+  the spans are valid only inside the callback.
+
+- **`Stream.columns(client, sql, cols, onBlock)`** — escape hatch
+  over `Client.Select`. Takes an `IColumnResult list` directly
+  (no record wrapping — uses `ColumnResult.ofColumn` internally),
+  invokes `onBlock` with the block row count. For shapes outside
+  the typed `blocks_*` / `rows_*` set: wide mixed-primitive reads,
+  `Array(Float64)` columns mixed with primitives, or for routing
+  Tier 2's `ColIntoArray<'T>` through (see below).
+
+  ```fsharp
+  let ts = ColInt64()
+  let v  = ColArr<float>(ColFloat64() :> IColumnOf<float>)
+  Stream.columns(client, "SELECT bar, prices FROM …", [ ts; v ], fun rows ->
+      let tsS = ts.AsSpan()
+      for i in 0 .. rows - 1 do
+          let priceRow = v.Row(i)  // float[]
+          ...)
+  ```
+
+The typed shape set covers the common combinations of `Int64`,
+`Int32`, `UInt8`, `UInt64`, `Float64`, `Nullable(Float64)`, and
+`Array(Float64)`. Pathologically wide shapes (≥7 mixed columns) stay
+on `Stream.columns`.
+
+### Tier 2 — `Ch.Drain` (materialised)
+
+`ColIntoArray<'T>(dst)` is a SELECT-only `IColumnResult` that
+decodes server rows **directly into a caller-owned typed array**,
+advancing an internal offset. Compared with `ColPrimitive<'T>`:
+
+- The byte buffer never resizes — references taken on a different
+  thread remain valid for the lifetime of the read. This is what
+  enables producer-consumer SPSC drains: one thread fills the
+  arrays, another reads them by index against a `Volatile.Write`-
+  published frontier.
+- The decoded prefix `col.AsSpan()` is stable across blocks — `dst`
+  is caller-owned and the column never relocates it. New blocks
+  extend the prefix; re-acquire the span to see them.
+- No block-by-block `CopyTo` — `Reader.ReadFull` writes straight
+  into `MemoryMarshal.AsBytes(Span(dst, offset, n))`.
+- `col.Rows` is the live offset — the frontier value, directly.
+
+```fsharp
+open Ch.Proto
+open Ch.Client
+open Ch.Drain
+open Ch.Stream
+
+// 1. Size the destination via a count() query against the same predicate.
+let mutable count = 0UL
+Stream.rows_u64(client, "SELECT count() FROM …", fun n -> count <- n)
+let n = int count
+
+// 2. Allocate caller-owned typed arrays and ColIntoArray decoders.
+let epochs = Array.zeroCreate<int64> n
+let bp1    = Array.zeroCreate<float> n
+let cE = ColIntoArray<int64>(epochs)
+let cB = ColIntoArray<float>(bp1)
+
+// 3. Drain via Stream.columns. The per-block callback publishes the
+//    frontier — col.Rows is already the offset.
+let frontier = [| 0 |]
+Stream.columns(client, "SELECT epoch_ms, bid_prices[1] FROM … ORDER BY epoch_ms",
+    [ cE :> IColumnResult; cB :> IColumnResult ],
+    fun _ -> Volatile.Write(&frontier.[0], cE.Rows))
+
+// 4. Random-access the caller-owned arrays directly. The arrays are the
+//    same objects passed to ColIntoArray; no `cE.Array` indirection
+//    required.
+let priceAtFirstEpoch = bp1.[0]
+```
+
+A grow-on-decode variant (`ColAccumulating<'T>`) is **not shipped**.
+Pre-sized strictly subsumes accumulation whenever the total row
+count is cheap to obtain, which is almost always (a separate
+`SELECT count() FROM … WHERE …` against the same predicate). Add
+the accumulating variant when a real consumer needs it.
+
+The high-level `Drain.arrays_<shape>` helpers (returning tuples of
+typed arrays) are likewise deferred — the manual idiom above is
+fine for the rare drain-shaped read; cooking it into a helper
+solves a problem that doesn't yet exist.
+
+### Retry (optional)
+
+`Ch.Stream.Retry` mirrors the `Stream.*` shape set with bounded
+retry-with-exponential-backoff. Each helper opens a fresh `Client`
+per attempt and re-runs the action on classified-transient
+exceptions occurring *before* the first stateful work (kernel
+mutation). The gate is flipped internally on the per-row /
+per-block boundary, so callers don't think about it:
+
+```fsharp
+open Ch.Stream
+
+Retry.rows_i64f64(opts, RetryPolicy.defaults, sql, fun ts v ->
+    // … kernel work. retry-safe up to the first invocation.
+)
+```
+
+For `Stream.columns` use `Retry.run(opts, policy, fun client gate -> …)`
+and flip `gate.Value <- true` inside the per-block callback (the
+escape hatch where the caller owns the OnBlock body).
+
+`RetryPolicy.defaults` is 5 attempts with 1-2-4-8 s backoff;
+`RetryPolicy.isRetryableNetwork` classifies `IOException`,
+`SocketException`, `TimeoutException`, `ObjectDisposedException`,
+and `UnexpectedEndOfStreamException` as transient. Customise via
+record update.
+
+Connection pooling is intentionally *not* shipped — `Client.Connect`
+is ~0.5 ms on localhost (bench in `tmp/bench-connect.fsx`); fresh
+connections per attempt sidestep stale-socket and session-state-
+bleed concerns.
+
+For a side-by-side migration table mapping legacy ad-hoc shapes
+onto the tiered API (and a worked `ColIntoArray` drain example),
+see [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
 ## Running queries
 
 A query is either a `SelectQuery` or an `InsertQuery` record. Start from the
@@ -222,8 +401,8 @@ let onBlock (rows: int) =
 let q = { SelectQuery.defaults with
             Body = "SELECT toInt32(number) AS n, toString(number) AS s
                     FROM system.numbers LIMIT 1000"
-            Results = [ { Name = "n"; Column = n }
-                        { Name = "s"; Column = s } ]
+            Results = [ ColumnResult.ofColumn n
+                        ColumnResult.ofColumn s ]
             OnBlock = onBlock }
 
 client.Select(q, ct)
@@ -232,12 +411,24 @@ client.Select(q, ct)
 Each `ColumnResult` has a `Name` (matched against the server's column
 name; pass `""` to accept by index only) and a `Column` instance that
 the driver decodes into in-place on every block. `OnBlock` runs after
-all columns are filled.
+all columns are filled. `ColumnResult.ofColumn c` is shorthand for
+`{ Name = ""; Column = c :> IColumnResult }` — use it whenever
+matching is positional (the common case). Use the record constructor
+directly when you need a named match (rare; mostly `ColAuto`-driven
+exploration code where the column names matter).
 
 > **Lifetime.** Decode is destructive — every block overwrites the previous
 > block's values in the same buffer. The `Results` columns (and any
 > `AsSpan()` view of them) are valid only *inside* `OnBlock`; copy out
 > anything you need to keep past the callback.
+>
+> **`AsSpan()` length.** `AsSpan()` on a `ColPrimitive` returns exactly
+> `Rows` items — no further `.Slice(0, rows)` required. The previous
+> block's data is in the same buffer; `Rows` (and the span length)
+> reflect the *current* block.
+>
+> For a stable typed view that survives across blocks, see
+> `ColIntoArray<'T>` under § **Streaming vs. drain — two API tiers**.
 
 ## INSERT — minimal
 
@@ -354,7 +545,8 @@ Typed columns also implement `IColumnOf<'T>` (Append/Row of `'T`).
 | `ColBool` | Bool | 1 byte 0/1 |
 
 All inherit a generic `ColPrimitive<'T>` and expose
-`AsSpan() : ReadOnlySpan<'T>` for zero-copy block scans.
+`AsSpan() : ReadOnlySpan<'T>` for zero-copy block scans. The span
+covers exactly `Rows` items.
 
 `Int128`/`UInt128` use `System.Int128` / `System.UInt128`. `Int256`/
 `UInt256` use a 2-`UInt128` struct (`Ch.Proto.Int256`, `Ch.Proto.UInt256`)
@@ -365,6 +557,36 @@ let v = ColUInt64()
 v.Append(42UL)
 v.AsSpan().[0]   // 42UL — zero-copy
 ```
+
+### `ColIntoArray<'T>` — pre-sized drain (SELECT-only)
+
+The companion to `ColPrimitive<'T>` for the materialised-read shape
+(see § **Streaming vs. drain — two API tiers**). Constructor takes
+a caller-owned typed array; decoded rows are written directly into
+it, one block at a time, advancing an internal offset. Same
+primitive constraints as `ColPrimitive` — `'T` must be a blittable
+value type (`Int8`/`16`/`32`/`64`, `UInt8`/`16`/`32`/`64`,
+`Float32`/`64`, `Bool`).
+
+```fsharp
+open Ch.Drain
+let dst = Array.zeroCreate<int64> 100_000
+let col = ColIntoArray<int64>(dst)
+// col.Type = "Int64" (derived from typeof<'T>)
+// col.Rows = 0 initially; advances by the block size on each
+//            DecodeColumn — read it as the live offset.
+// col.AsSpan() returns ReadOnlySpan(dst, 0, col.Rows).
+// col.Array IS dst — same reference; random-access by index works
+//            on the caller-held variable without going through col.
+```
+
+`DecodeColumn` throws `InvalidOperationException` if the next block
+would overflow the destination — size the array correctly (a
+preceding `SELECT count() FROM … WHERE …` is the canonical idiom)
+or use `ColPrimitive<'T>` for streaming-overwrite reads.
+`EncodeColumn` throws `NotSupportedException` — this is a
+SELECT-only column. For INSERT input use `ColPrimitive` or its
+sealed leaves.
 
 ### BFloat16
 

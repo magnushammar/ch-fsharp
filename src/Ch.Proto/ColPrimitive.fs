@@ -63,9 +63,12 @@ type ColPrimitive<'T
         let slice = ReadOnlySpan(buf, i * elemSize, elemSize)
         MemoryMarshal.Read<'T>(slice)
 
-    /// Zero-copy view of the current rows as a span of `'T`. The view aliases
-    /// the column's reused buffer — it is valid only until the next
-    /// `DecodeColumn`, `Reset`, `Append`, or `AppendRange`.
+    /// Zero-copy view of exactly `Rows` items (not the underlying buffer
+    /// capacity) — no further slicing required. The view aliases the
+    /// column's reused buffer, so it is valid only until the next
+    /// `DecodeColumn`, `Reset`, `Append`, or `AppendRange`; copy out
+    /// anything you need to keep past those points. For a stable typed
+    /// view across blocks see `ColIntoArray<'T>`.
     member _.AsSpan() : ReadOnlySpan<'T> =
         MemoryMarshal.Cast<byte, 'T>(ReadOnlySpan(buf, 0, count * elemSize))
 

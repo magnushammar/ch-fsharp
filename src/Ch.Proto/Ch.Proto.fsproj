@@ -36,6 +36,7 @@
     <Compile Include="ColNullable.fs" />
     <Compile Include="ColLowCardinality.fs" />
     <Compile Include="ColPrimitive.fs" />
+    <Compile Include="ColIntoArray.fs" />
     <Compile Include="ColStr.fs" />
     <Compile Include="ColTime.fs" />
     <Compile Include="ColFixed.fs" />

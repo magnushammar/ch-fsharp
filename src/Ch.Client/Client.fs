@@ -62,6 +62,27 @@ type InsertQuery = {
 }
 
 [<RequireQualifiedAccess>]
+module ColumnResult =
+    /// Wrap an `IColumnResult` as a positional `ColumnResult` (empty
+    /// name; matched by index against the server's columns). The
+    /// canonical builder for `SelectQuery.Results` / `InsertQuery.Input`
+    /// lists when the columns are matched positionally — which is the
+    /// dominant pattern in this codebase. Use the record constructor
+    /// directly when you need a named match (rare; mostly `ColAuto`-
+    /// driven exploration code).
+    ///
+    /// ```fsharp
+    /// let ts = ColInt64()
+    /// let v  = ColFloat64()
+    /// let q = { SelectQuery.defaults with
+    ///             Body    = "..."
+    ///             Results = [ ColumnResult.ofColumn ts; ColumnResult.ofColumn v ]
+    ///             OnBlock = fun rows -> ... }
+    /// ```
+    let inline ofColumn (c: #IColumnResult) : ColumnResult =
+        { Name = ""; Column = c :> IColumnResult }
+
+[<RequireQualifiedAccess>]
 module SelectQuery =
     /// Default `SelectQuery` skeleton — fill in `Body`, plus `Results` +
     /// `OnBlock` when the query returns rows. Callers use record-update:
