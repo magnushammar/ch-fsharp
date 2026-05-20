@@ -185,4 +185,37 @@ let tests = testList "ColIntoArray" [
         Expect.equal (ColIntoArray<float32>([||]).Type) "Float32" "Float32"
         Expect.equal (ColIntoArray<float>([||]).Type)   "Float64" "Float64"
         Expect.equal (ColIntoArray<bool>([||]).Type)    "Bool"    "Bool"
+
+    testCase "ElemSize matches sizeof<'T>" <| fun _ ->
+        Expect.equal (ColIntoArray<int8>([||]).ElemSize)    1 "Int8"
+        Expect.equal (ColIntoArray<int16>([||]).ElemSize)   2 "Int16"
+        Expect.equal (ColIntoArray<int32>([||]).ElemSize)   4 "Int32"
+        Expect.equal (ColIntoArray<int64>([||]).ElemSize)   8 "Int64"
+        Expect.equal (ColIntoArray<float32>([||]).ElemSize) 4 "Float32"
+        Expect.equal (ColIntoArray<float>([||]).ElemSize)   8 "Float64"
+        Expect.equal (ColIntoArray<bool>([||]).ElemSize)    1 "Bool"
+
+    testCase "Bool decodes 1 byte per row through MemoryMarshal" <| fun _ ->
+        // ClickHouse Bool wire format is 1 byte per row, 0 / 1. The
+        // reinterpret cast on a bool span is the one non-obvious
+        // element type — exercise an actual decode, not just .Type.
+        let dst : bool array = Array.zeroCreate 4
+        let col = ColIntoArray<bool>(dst)
+        col.DecodeColumn(Reader(new MemoryStream([| 1uy; 0uy; 1uy; 1uy |])), 4)
+        Expect.equal col.Rows 4 "all four bool rows decoded"
+        Expect.sequenceEqual dst [ true; false; true; true ] "bytes mapped to bools"
+
+    testCase "DecodeColumn on a truncated stream throws, Rows unchanged" <| fun _ ->
+        // The stream carries only 10 rows' worth of bytes but the block
+        // claims 50. ReadFull throws part-way; offset must NOT advance,
+        // so Rows stays put (contrast the overflow case, which throws
+        // before any read).
+        let dst : int64 array = Array.zeroCreate 100
+        let col = ColIntoArray<int64>(dst)
+        let truncated : byte array = Array.zeroCreate (10 * 8)
+        let r = Reader(new MemoryStream(truncated))
+        Expect.throwsT<UnexpectedEndOfStreamException>
+            (fun () -> col.DecodeColumn(r, 50))
+            "decoding 50 rows from a 10-row stream must throw"
+        Expect.equal col.Rows 0 "Rows unchanged after a failed (short-read) decode"
 ]

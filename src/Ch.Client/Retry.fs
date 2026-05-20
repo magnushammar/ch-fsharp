@@ -77,6 +77,46 @@ module RetryPolicy =
         IsRetryable   = isRetryableNetwork
     }
 
+/// Pure retry control loop, factored out of `Retry.loop` so the
+/// retry decision logic — classifier ∧ gate ∧ attempt-count, plus
+/// the `BaseBackoffMs · 2ⁿ` backoff schedule — is unit-testable
+/// without a live server. `Retry.loop` is the sole production caller
+/// and supplies the real `Client.Connect` + `Thread.Sleep`; tests
+/// supply a throwing thunk and a recording `sleep`.
+[<RequireQualifiedAccess>]
+module internal RetryCore =
+
+    /// Run `attempt` under `policy`'s retry envelope.
+    ///
+    /// Returns normally as soon as `attempt` completes without
+    /// throwing. Re-runs `attempt` when it throws an exception that
+    /// is `policy.IsRetryable`, the `gate` is still clear, and fewer
+    /// than `MaxAttempts` runs have happened — calling `sleep` with
+    /// `BaseBackoffMs · 2ⁿ` before retry `n` (zero-indexed). Any
+    /// other thrown exception — non-retryable, gate already set, or
+    /// attempts exhausted — propagates unchanged.
+    ///
+    /// `gate` is the kernel-state safety latch: `attempt` flips it
+    /// `true` on its first stateful work, after which a thrown
+    /// exception always propagates (re-running would double-count
+    /// the caller's accumulators).
+    let run (policy: RetryPolicy)
+            (gate: bool ref)
+            (sleep: int -> unit)
+            (attempt: unit -> unit) : unit =
+        let mutable n = 0
+        let mutable success = false
+        while not success do
+            try
+                attempt ()
+                success <- true
+            with
+            | ex when policy.IsRetryable ex
+                      && not gate.Value
+                      && n < policy.MaxAttempts - 1 ->
+                sleep (policy.BaseBackoffMs * (1 <<< n))
+                n <- n + 1
+
 /// Bounded-retry helpers that mirror `Stream.*` shape-for-shape.
 ///
 /// Each helper opens a fresh `Client` per attempt via
@@ -95,19 +135,9 @@ type Retry =
             (opts: ChOptions, policy: RetryPolicy,
              action: Client -> bool ref -> unit) : unit =
         let gate = ref false
-        let mutable attempt = 0
-        let mutable success = false
-        while not success do
-            try
-                use client = Client.Connect(opts, CancellationToken.None)
-                action client gate
-                success <- true
-            with
-            | ex when policy.IsRetryable ex
-                      && not gate.Value
-                      && attempt < policy.MaxAttempts - 1 ->
-                Thread.Sleep(policy.BaseBackoffMs * (1 <<< attempt))
-                attempt <- attempt + 1
+        RetryCore.run policy gate (fun (ms: int) -> Thread.Sleep ms) (fun () ->
+            use client = Client.Connect(opts, CancellationToken.None)
+            action client gate)
 
     // -------------------------------------------------------------------------
     // Escape hatch — generic.

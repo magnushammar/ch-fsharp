@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
+
+### Added
+
+- **Test coverage for the Tier 1 / Tier 2 SELECT API.** `RetryTests.fs` — 17 cases, server-free:
+  - `RetryPolicy.isRetryableNetwork` classifier across every retryable shape (`IOException` and a subclass, `SocketException`, `TimeoutException`, `ObjectDisposedException`, `UnexpectedEndOfStreamException`) and the non-retryable ones (`InvalidDataException`, plain `Exception`, an F# exception).
+  - `RetryPolicy.defaults` field values, and that its classifier routes through `isRetryableNetwork`.
+  - `RetryCore.run` control loop — first-try success, retry-then-recover, `MaxAttempts` exhaustion asserting the exact `1-2-4-8 s` backoff schedule, non-retryable fast-fail, the gate-blocks-retry no-double-count property, and `MaxAttempts = 1`.
+
+  `ColIntoArrayTests.fs` gains 3 cases: `ElemSize` across the primitive set, a `Bool` 1-byte-per-row decode through the `MemoryMarshal` reinterpret, and a truncated-stream decode (throws `UnexpectedEndOfStreamException`, `Rows` unchanged). Suite: 248 → 268 tests.
+
+### Changed
+
+- **`Retry.loop` refactored for testability.** The retry control loop is extracted into an `internal RetryCore.run` that takes the attempt thunk and the `sleep` function as parameters, so the classifier ∧ gate ∧ attempt-count guard and the `BaseBackoffMs · 2ⁿ` backoff schedule are unit-testable without a live server. Behaviour is byte-for-byte identical; `Retry.loop` is the sole production caller and supplies the real `Client.Connect` + `Thread.Sleep`. `RetryCore` is `internal` — the public surface of `Ch.Client` is unchanged.
+- **`tests/Ch.Proto.Tests` now references `Ch.Client`** (required to test `Ch.Stream.Retry` / `RetryCore`), and `Ch.Client` exposes its internals to the test assembly via `InternalsVisibleTo`. The offline `build` and `test` commands still work without a server.
+
+### Not changed
+
+- No protocol changes, no public API changes; this is a test-coverage + internal-refactor release.
+
+---
+
+## 0.5.0
 
 ### Added
 

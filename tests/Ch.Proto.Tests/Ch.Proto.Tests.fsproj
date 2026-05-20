@@ -32,6 +32,7 @@
     <Compile Include="ColAutoTests.fs" />
     <Compile Include="ColUInt64Tests.fs" />
     <Compile Include="ColIntoArrayTests.fs" />
+    <Compile Include="RetryTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -41,6 +42,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Ch.Proto\Ch.Proto.fsproj" />
+    <ProjectReference Include="..\..\src\Ch.Client\Ch.Client.fsproj" />
   </ItemGroup>
 
 </Project>

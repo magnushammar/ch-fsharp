@@ -27,4 +27,11 @@
     <ProjectReference Include="..\Ch.Proto\Ch.Proto.fsproj" />
   </ItemGroup>
 
+  <!-- Expose the internal `RetryCore` retry-loop to the test project so
+       the gate / attempt-count / backoff logic is unit-testable without
+       a live server. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ch.Proto.Tests" />
+  </ItemGroup>
+
 </Project>

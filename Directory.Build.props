@@ -35,7 +35,7 @@
   <!-- Shared NuGet package metadata. Per-project files only need to set
        PackageId, Description, and IsPackable. -->
   <PropertyGroup>
-    <Version>0.4.1</Version>
+    <Version>0.5.1</Version>
     <Authors>Magnus Hammar</Authors>
     <Copyright>Copyright 2026 Magnus Hammar</Copyright>
     <RepositoryUrl>https://github.com/magnushammar/ch-fsharp</RepositoryUrl>

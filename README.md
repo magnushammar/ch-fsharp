@@ -31,7 +31,7 @@ server (default `localhost:9000`).
 ch-go is included as a submodule.
 
 ```bash
-dotnet run --project tests/Ch.Proto.Tests           # 236 Expecto tests
+dotnet run --project tests/Ch.Proto.Tests           # 268 Expecto tests
 dotnet run --project src/Ch.Bench.Numbers -- --ping # smoke handshake
 ```
 
@@ -1066,7 +1066,7 @@ times effectively tie.
 ## Status / coverage
 
 Status of every column family and feature lives in
-`plans/HANDOVER.md`. As of v0.4.1: 236 tests pass, INSERT and SELECT
+`plans/HANDOVER.md`. As of v0.5.1: 268 tests pass, INSERT and SELECT
 both work end-to-end with and without LZ4 compression, and `ColAuto`
 covers every column we implement — scalars, parameterised types,
 *and* composites (Array / Nullable / Map / Tuple / LowCardinality
